@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pythons/
+.uv-cache/
+.uv
+.env
+.env.local
+
+# 包管理器缓存（本机被指向工作区内，避免写用户目录）
+.cache/
+.local/
+.config/
+.pnpm-store/
+.pnpm/
+
+# 运行产物（每次分析一个目录）
+backend/data/
+backend/.dev-logs/
+backend/tests/fixtures/*.pdf
+backend/tests/fixtures/sample_repo/
+backend/tests/fixtures/.cache/
+
+# 前端
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+
+# 跨会话开发日志（含过程记录与本地环境细节）：不随仓库发布
+agent-log/

@@ -1,0 +1,98 @@
+{
+  "label": "mock（脚本化理想 Agent）",
+  "provider": {
+    "protocol": "openai-compatible",
+    "base_url": "http://127.0.0.1:8231/v1",
+    "model": "mock-model"
+  },
+  "generated_at": "2026-09-14T22:59:13",
+  "goldset": "eval/goldset.yaml",
+  "aggregate": {
+    "pairs": 1,
+    "plan_recall": 1.0,
+    "plan_precision": 1.0,
+    "file_recall": 1.0,
+    "file_precision": 1.0,
+    "symbol_recall": 1.0,
+    "citation_verifiable_rate": 1.0,
+    "honest_not_found_rate": 1.0,
+    "citations_total": 2,
+    "citations_verified": 2,
+    "tool_calls_total": 7,
+    "seconds_total": 1.3
+  },
+  "pairs": [
+    {
+      "id": "synthetic-lora",
+      "commit_sha": "38a441ad238de34ee6b98ddc99e955c9eede2090",
+      "plan": {
+        "labeled": 3,
+        "predicted": 3,
+        "matched": 3,
+        "recall": 1.0,
+        "precision": 1.0,
+        "unmatched_predictions": []
+      },
+      "localization": {
+        "file_recall": 1.0,
+        "file_recall_hit": 2,
+        "file_recall_total": 2,
+        "file_precision": 1.0,
+        "file_precision_hit": 2,
+        "file_precision_total": 2,
+        "symbol_recall": 1.0,
+        "symbol_recall_hit": 2,
+        "symbol_recall_total": 2
+      },
+      "citations": {
+        "total": 2,
+        "verified": 2,
+        "failed": 0,
+        "rate": 1.0
+      },
+      "honesty": {
+        "expected_not_found": 1,
+        "correct_not_found": 1,
+        "rate": 1.0
+      },
+      "cost": {
+        "tool_calls": 7,
+        "input_tokens": 896,
+        "seconds": 1.3
+      },
+      "per_innovation": [
+        {
+          "labeled": "低秩重参数化",
+          "predicted": "低秩重参数化",
+          "status": "matched",
+          "predicted_paths": [
+            "loralib/layers.py"
+          ],
+          "required_paths": [
+            "loralib/layers.py"
+          ]
+        },
+        {
+          "labeled": "零初始化与 alpha/r 缩放",
+          "predicted": "零初始化与 alpha/r 缩放",
+          "status": "matched",
+          "predicted_paths": [
+            "loralib/layers.py"
+          ],
+          "required_paths": [
+            "loralib/layers.py"
+          ]
+        },
+        {
+          "labeled": "冻结主干只训练低秩分支",
+          "predicted": "冻结主干只训练低秩分支",
+          "status": "not_found",
+          "predicted_paths": [],
+          "required_paths": []
+        }
+      ],
+      "run_id": "20260914-225911-e2df91",
+      "wall_clock_seconds": 1.3
+    }
+  ]
+}

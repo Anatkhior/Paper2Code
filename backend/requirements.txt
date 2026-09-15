@@ -1,0 +1,23 @@
+# PaperLens backend — v0 依赖（全部锁精确版本；升级必须单独一次提交并重跑 gold set）
+# 注意：所有依赖的 requires_python 都是 >=3.10，本机 Python 3.10.12 可直接使用。
+
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+sse-starlette==3.4.11
+litellm==1.100.1
+pydantic==2.13.5
+pydantic-settings==2.15.0   # litellm 1.100.1 要求 >=2.14.1
+httpx==0.28.1
+python-dotenv==1.1.1
+pymupdf==1.28.2
+gitpython==3.1.62
+
+# 开发/测试
+pytest==8.4.2
+pytest-asyncio==1.2.0
+
+# HTTP 表单上传（FastAPI 的 UploadFile 依赖它）
+python-multipart==0.0.32
+
+# 评估需要
+pyyaml==6.0.3

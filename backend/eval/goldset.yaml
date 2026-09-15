@@ -1,0 +1,59 @@
+# PaperLens gold set —— "标准答案表"
+#
+# 标注纪律（比指标本身更重要）：
+#   1. 先人工读完论文和代码、写下标注，**并冻结 repo 的 commit_sha**，之后才允许跑系统。
+#   2. 标注时不参考系统输出。想看结果改 prompt 请另开"调参集"，gold set 只在最后跑一次。
+#   3. commit_sha 一旦冻结就不要再改：仓库会持续演进，不钉死 commit 的指标没有意义。
+#      改了仓库内容导致 commit 变化时，m4_check 会报错提醒你重新标注 —— 那是纪律在起作用，不是 bug。
+#
+# 一条 gold 的字段：
+#   id              标识
+#   paper.pdf       相对 backend/ 的 PDF 路径（真实论文请放在 eval/pdfs/ 下）
+#   repo.url        https 仓库地址；本地夹具仓库写相对 backend/ 的路径（需要 PAPERLENS_ALLOW_LOCAL_REPO_PATHS=true）
+#   repo.commit_sha 标注时冻结的 commit
+#   innovations[].aliases          用于"人工标注 ↔ 系统清单"的对齐（关键词，不是标准答案的措辞要求）
+#   innovations[].must_find_files  实现所在的文件（核心标注）
+#   innovations[].must_find_symbols 实现所在的函数/类（可选，更严）
+#   innovations[].expect_not_found 该创新点在仓库里确实没有实现（考"能不能诚实地说没有"）
+
+- id: synthetic-lora
+  paper:
+    title: "Papertest: A Synthetic Paper for Plumbing Verification"
+    pdf: tests/fixtures/synthetic_paper.pdf
+  repo:
+    url: tests/fixtures/sample_repo
+    commit_sha: "38a441ad238de34ee6b98ddc99e955c9eede2090"
+  labeler: paperlens-fixture
+  labeled_at: "2026-09-11"
+  notes: >
+    合成夹具：论文和仓库都是我造的，所以人工标注的 ground truth 绝对可靠。
+    它验证的是**评估链路与指标定义本身**（会不会算错、会不会虚高），不代表真实模型的能力。
+  innovations:
+    - name: 低秩重参数化
+      aliases: [低秩, low-rank, reparameterization, lora_A, lora_B]
+      must_find_files: [loralib/layers.py]
+      must_find_symbols: ["Linear.forward"]
+    - name: 零初始化与 alpha/r 缩放
+      aliases: [初始化, initialization, scaling, lora_alpha]
+      must_find_files: [loralib/layers.py]
+      must_find_symbols: ["reset_parameters"]
+    - name: 冻结主干只训练低秩分支
+      aliases: [冻结, freeze, requires_grad, frozen]
+      expect_not_found: true
+      notes: 仓库里确实没有冻结逻辑（train.py 对全部参数做 AdamW），所以正确答案就是"未找到"。
+
+# 真实论文请按下面的模板加（示例：LoRA）
+# - id: lora
+#   paper:
+#     title: "LoRA: Low-Rank Adaptation of Large Language Models"
+#     pdf: eval/pdfs/lora.pdf
+#   repo:
+#     url: https://github.com/microsoft/LoRA
+#     commit_sha: "<你标注那天的 commit>"
+#   labeler: <你的名字>
+#   labeled_at: "2026-XX-XX"
+#   innovations:
+#     - name: 低秩重参数化
+#       aliases: [low-rank, lora_A, lora_B, rank]
+#       must_find_files: [loralib/layers.py]
+#       must_find_symbols: ["LoRALayer", "Linear.forward"]
