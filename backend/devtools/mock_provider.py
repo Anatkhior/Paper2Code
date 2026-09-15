@@ -15,6 +15,11 @@
 | `no-tools`          | 不返回工具调用，只返回文本 → 自检应判定「不支持 function calling」 |
 | `bad-args`          | 返回拼错的参数（page 是字符串）→ 自检应判定「工具参数不可靠」 |
 | `html-error`        | 返回一个 HTML 错误页（模拟网关/Cloudflare 报错）→ 自检必须说人话，不能把整页 HTML 甩给用户 |
+| `rate-limited-once` | 第一次请求返回 429（带 `retry-after: 1`，话术照抄真实网关）→ 验证后端会退避重试并跑完，而不是整个 run 失败 |
+| `rate-limited-late-N` | 攒够 N 轮工具结果后一直 429 → 验证「失败也要交付已确认的部分」（产物仍落盘并核验）；m1 用 `-3`（清单已记录）、m2 用 `-5`（已提交结论） |
+| `headers-only-limit` | 成功响应只带 `x-ratelimit-limit-requests`，**错误话术里什么都不说** → 验证「权威信号优先」（不靠解析中文话术也能降速） |
+| `quota-exhausted` | 一直返回 429 + `quota`/余额话术 → 验证「不重试、直接说清重试无用」 |
+| `tpm-limited` | 一直返回 429 + `tokens per minute` 话术 → 验证「按 token 而不是按请求节流」 |
 
 注意：定位阶段**只提交用户在提示里勾选的那些创新点**。如果不管用户勾了什么、按固定剧本
 提交全部三条，用户只勾一条时就会被后端一直拒绝，于是原地空转到轮数上限。
@@ -41,6 +46,7 @@ app = FastAPI(title="mock openai-compatible provider")
 
 MODEL_NAME = "mock-model"
 CHUNK_DELAY = 0.03  # 故意放慢，这样「边跑边推」和「跑完一次性返回」能被测试区分开
+_RATE_LIMIT_HITS: dict[str, int] = {}   # 限流变体用：按模型名记请求次数
 
 _FORWARD = layer_lines("    def forward(self, x):")
 _RESET = layer_lines("    def reset_parameters(self):")
@@ -662,6 +668,63 @@ async def chat_completions(request: Request):
             ),
         )
 
+    # 额度用尽：长得像限流（用 429），但重试永远不会成功 → 后端必须**不重试**并说清
+    if "quota-exhausted" in model:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": {
+                    "message": "您的账户余额不足，请充值后再试（insufficient balance / quota exceeded）",
+                    "type": "insufficient_quota",
+                    "code": "insufficient_quota",
+                }
+            },
+        )
+
+    # TPM：卡的是 token 速率，按请求拉长间隔没用 → 后端要按 token 节流并给出正确建议
+    if "tpm-limited" in model:
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": {
+                    "message": "Rate limit reached for 200000 tokens per minute (TPM). Please retry later.",
+                    "type": "tokens",
+                    "code": "rate_limit_exceeded",
+                }
+            },
+        )
+
+    # 限流：话术与真实网关一致（实测某中转站：1 分钟最多 10 次，含失败次数）。
+    #   rate-limited-once    : 只拦第一次 → 验证后端会退避重试并跑完
+    #   rate-limited-late-N  : 攒够 N 轮工具结果后一直拦 → 验证"失败也要交付已确认的部分"
+    #                          （N 要按剧本选：侦察记录清单在第 3 轮、定位提交第一条结论在第 4-5 轮）
+    #   rate-limited-always  : 从第一次就一拦到底
+    if "rate-limited" in model:
+        _RATE_LIMIT_HITS[model] = _RATE_LIMIT_HITS.get(model, 0) + 1
+        tool_rounds = len([m for m in body.get("messages", []) if m.get("role") == "tool"])
+        threshold_match = re.search(r"late-(\d+)", model)
+        threshold = int(threshold_match.group(1)) if threshold_match else 3
+        blocked = (
+            "always" in model
+            or ("late" in model and tool_rounds >= threshold)
+            or ("late" not in model and "always" not in model and _RATE_LIMIT_HITS[model] == 1)
+        )
+        if blocked:
+            return JSONResponse(
+                status_code=429,
+                headers={"retry-after": "1"},
+                content={
+                    "error": {
+                        "message": (
+                            "您已达到总请求数限制：1分钟内最多请求10次，包括失败次数，"
+                            "请检查您的请求是否正确"
+                        ),
+                        "type": "rate_limit_error",
+                        "code": "rate_limit_exceeded",
+                    }
+                },
+            )
+
     messages = body.get("messages", [])
     stream = bool(body.get("stream"))
     include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
@@ -676,7 +739,7 @@ async def chat_completions(request: Request):
             chunks = chunks[:-1] + [_usage_chunk(), chunks[-1]]
         if not stream:
             return JSONResponse(content=_non_streaming(chunks))
-        return _sse(chunks)
+        return _sse(chunks, model)
 
     # slow-model：第一轮响应前先停 1.2 秒，其余行为与 mock-model 完全一致。
     # 两个用途：① m0 验证 per_turn_timeout_seconds 真的会在时限内打断慢端点；
@@ -692,17 +755,36 @@ async def chat_completions(request: Request):
     if not stream:
         return JSONResponse(content=_non_streaming(chunks))
 
-    return _sse(chunks)
+    return _sse(chunks, model)
 
 
-def _sse(chunks: list[str]) -> StreamingResponse:
+# 真实网关会在**成功响应**上声明限额（OpenAI 风格：`10, 10;w=60` = 上限/突发/窗口秒）。
+# mock 也带上，用来验证"能不能从响应里读到端点声明的限额"。
+RATE_LIMIT_HEADERS = {
+    "x-ratelimit-limit-requests": "10, 10;w=60",
+    "x-ratelimit-remaining-requests": "9",
+    "x-ratelimit-limit-tokens": "200000, 200000;w=60",
+}
+
+
+def _sse(chunks: list[str], model: str = "") -> StreamingResponse:
     """把拼好的 chunk 序列包成 SSE 流式响应。"""
     async def gen() -> AsyncIterator[str]:
         for piece in [*chunks, "data: [DONE]\n\n"]:
             await asyncio.sleep(CHUNK_DELAY)
             yield piece
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    # 默认**不带**限额头（否则每个验收用例都会顺带"学会"限额，断言就分不清是谁教的）。
+    # headers-only-limit 用来单独验证"只看响应头也能自动降速"。
+    headers: dict[str, str] = {}
+    if "headers-only-limit" in model:
+        # OpenAI 官方风格：`上限, 突发; 窗口秒`，话术里一个字都不提
+        headers = {
+            "x-ratelimit-limit-requests": "20, 20;w=60",
+            "x-ratelimit-remaining-requests": "19",
+            "x-ratelimit-limit-tokens": "200000, 200000;w=60",
+        }
+    return StreamingResponse(gen(), media_type="text/event-stream", headers=headers)
 
 
 def _non_streaming(chunks: list[str]) -> dict[str, Any]:

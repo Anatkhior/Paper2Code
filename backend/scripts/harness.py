@@ -80,7 +80,17 @@ def assert_port_free(port: int) -> None:
 
 def start_service(module: str, port: int, extra_env: dict[str, str] | None = None) -> subprocess.Popen:
     assert_port_free(port)
-    env = {**os.environ, "PYTHONPATH": str(ROOT), **(extra_env or {})}
+    # 验收必须可复现：把"本机个人配置"里会影响断言的项显式钉住。
+    # 实测踩过：开发者为自己的网关在 backend/.env 里写了
+    # PAPERLENS_LLM_MAX_REQUESTS_PER_MINUTE=8，于是限流相关的断言全都读到了 7.5s，
+    # 「从响应头学会限额」这类断言就分不清是谁教的。
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(ROOT),
+        "PAPERLENS_LLM_MAX_REQUESTS_PER_MINUTE": "0",
+        "PAPERLENS_REPO_NETWORK_MODE": "local",
+        **(extra_env or {}),
+    }
     return subprocess.Popen(
         [sys.executable, "-m", "uvicorn", module, "--port", str(port), "--log-level", "warning"],
         cwd=ROOT,

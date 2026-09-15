@@ -57,6 +57,16 @@ class Settings(BaseSettings):
     # ---- 单次 LLM 调用的上限，防止某个端点卡死 ----
     per_turn_timeout_seconds: int = 180
 
+    # ---- LLM 限流（§8 运行治理，2026-09-15 补）----
+    # 一次定位/侦察要几十次 LLM 调用（一次 turn 一次请求），而有些网关卡得很死：
+    # 实测某中转站"1 分钟内最多请求 10 次"，20 轮只花 61.6s ≈ 19.5 次/分钟 → 必然撞限流。
+    #   0 = 不主动节流（只在撞到 429 后退避重试，并记住这次的节奏）；
+    #   N = 客户端按每分钟 N 次发请求（宁可慢，也别半路失败）。
+    # 你知道自己端点的限额就写上（例：10），不知道就留 0，代码会在第一次 429 后自适应。
+    llm_max_requests_per_minute: int = 0
+    # 撞到 429 最多重试几次（退避：优先用响应里的 retry-after，其次指数退避）
+    llm_max_retries: int = 5
+
     # ---- LLM 请求的 User-Agent ----
     # 为什么可配：有些套了 Cloudflare 的第三方网关会把 openai-python SDK 的默认 UA
     # （"OpenAI/Python x.x"）当 bot 直接 403（实测于 2026-09-13，1li.li），

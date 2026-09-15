@@ -410,6 +410,231 @@ async def section_e(check: Checker, client: httpx.AsyncClient) -> None:
     check(types and types[-1] == "run_end", "以 run_end 收尾")
 
 
+async def section_f(check: Checker, client: httpx.AsyncClient) -> None:
+    """限流（429）回归：退避重试 + 失败也要交付已确认的部分。
+
+    起因（2026-09-15 用户实测）：某中转站限制"1 分钟最多 10 次，含失败次数"，而一次定位
+    要几十次调用 → 必然撞限流；原来的代码撞到 429 直接让整个 run failed，用户前面跑出来的
+    东西全丢。所以这里钉两件事：
+      ① 429 要能自动退避重试并跑完（不是一撞就死）；
+      ② 重试用尽仍然失败时，已记录的结论必须照常核验、落盘、交付。
+    """
+    from app import providers as providers_module
+    from app.config import settings
+
+    check.section("F. 网关限流（429）：退避重试 + 失败也交付")
+
+    # --- ① 只拦第一次：退避后应能跑完整条侦察 ---
+    providers_module.reset_llm_pacing()
+    try:
+        run_id = await upload_paper(client, check, "rate-limited-once")
+        recon = await client.post(
+            f"/api/runs/{run_id}/recon", json={"provider": provider("rate-limited-once")}
+        )
+        check(recon.status_code == 200, "限流端点上阶段 A 能启动")
+        events, _, _ = await collect_sse(client, f"/api/runs/{run_id}/events", timeout_s=120)
+        types = [event["type"] for event in events]
+        retries = events_of(events, "llm_retry")
+        check(bool(retries), f"撞到 429 会发 llm_retry 事件（用户看得见在等）：{types[:5]}…")
+        if retries:
+            payload = retries[0]["data"]
+            check(
+                payload.get("delay_seconds", 0) > 0 and payload.get("attempt") == 1,
+                f"重试事件带等待秒数与次数（等待 {payload.get('delay_seconds')}s，第 {payload.get('attempt')} 次）",
+            )
+        check("plan_ready" in types, "退避重试之后侦察照样跑完（不是一撞限流就死）")
+        check(events and events[-1]["type"] == "run_end", "以 run_end 收尾")
+        check(
+            events_of(events, "run_end")[0]["data"]["status"] == "ok",
+            f"限流恢复后这一轮状态是 ok（实际 {events_of(events, 'run_end')[0]['data']['status']}）",
+        )
+        # 节奏学习是**后端进程内**的状态，HTTP 层读不到——这里直接单测那段逻辑
+        # （端到端证据是上面那条：等待 6.0s 就是把"1 分钟 10 次"算成了 6s/次）。
+        providers_module.reset_llm_pacing()
+        providers_module._retry_delay(
+            RuntimeError("您已达到总请求数限制：1分钟内最多请求10次，包括失败次数"),
+            0,
+            "rate_limit",
+        )
+        check(
+            providers_module._effective_llm_interval() >= 5.0,
+            f"从网关话术学到限额并自动降速（最小间隔 {providers_module._effective_llm_interval():.1f}s）",
+        )
+    finally:
+        providers_module.reset_llm_pacing()   # 别拖慢后面的验收
+
+    # --- ② 攒够几轮后一直拦：run 失败，但已确认的部分必须交付 ---
+    providers_module.reset_llm_pacing()
+    saved_retries = settings.llm_max_retries
+    try:
+        settings.llm_max_retries = 1          # 断言要快：退避 1 次就放弃
+        run_id = await upload_paper(client, check, "rate-limited-late-2")
+        recon = await client.post(
+            f"/api/runs/{run_id}/recon", json={"provider": provider("rate-limited-late-2")}
+        )
+        check(recon.status_code == 200, "持续限流的端点上阶段 A 能启动")
+        events, _, _ = await collect_sse(client, f"/api/runs/{run_id}/events", timeout_s=180)
+        end = events_of(events, "run_end")
+        check(bool(end), "持续限流最终以 run_end 收尾（不会挂住）")
+        if end:
+            status = end[0]["data"]["status"]
+            reason = str(end[0]["data"].get("stopped_reason", ""))
+            check(status == "failed", f"重试用尽后如实标记失败（status={status}）")
+            check(
+                "限流" in reason or "429" in reason or "RateLimit" in reason,
+                f"失败原因说人话、指得出是限流：{reason[:90]}…",
+            )
+            check(
+                end[0]["data"].get("partial") is True,
+                "失败轮标记为 partial（前端能区分'跑完了'和'只交付了一部分'）",
+            )
+        # 失败也要留下可查的现场（清单是否已产出取决于限流来得多早；
+        # 「已确认的结论照样交付」由 m2 的 I 段钉——那里是定位阶段，会先攒下几条结论）。
+        detail = await client.get(f"/api/runs/{run_id}")
+        check(detail.status_code == 200, "失败后仍能取到 run 详情")
+        payload = detail.json()
+        check(
+            isinstance(payload.get("events"), list) and payload["events"],
+            f"失败现场的事件历史仍在（{len(payload.get('events') or [])} 条）",
+        )
+        check(
+            "error" in [event["type"] for event in events],
+            "失败路径发了 error 事件（用户知道为什么停）",
+        )
+    finally:
+        settings.llm_max_retries = saved_retries
+        providers_module.reset_llm_pacing()
+
+
+async def section_g(check: Checker, client: httpx.AsyncClient) -> None:
+    """不同网关风格的限额识别：权威信号优先 + 分类报错（2026-09-15 第二轮）。
+
+    上一轮只覆盖了"网关在错误话术里写了限额"这一种；这一轮补上另外三种真实存在的风格：
+      ① 只在**响应头**里声明限额（OpenAI 官方风格，话术里一个字不提）；
+      ② **额度用尽**（长得像 429，但重试永远不会成功）；
+      ③ **TPM**（token/分钟，按请求降速没用，得按 token 节流）。
+    """
+    from app import providers as providers_module
+
+    check.section("G. 不同网关风格的限额识别（响应头 / 额度用尽 / TPM）")
+
+    # ---- ① 只在响应头里声明限额：不靠话术也要学会 ----
+    pacing_before = (await client.get("/api/health")).json().get("llm_pacing", {})
+    headers_run = await upload_paper(client, check, "headers-only-limit")
+    events = await run_recon(client, check, headers_run, "headers-only-limit")
+    pacing_after = (await client.get("/api/health")).json().get("llm_pacing", {})
+    check(
+        pacing_after.get("source") == "header",
+        f"从响应头学会了端点限额（source={pacing_after.get('source')}）——不依赖任何话术或配置",
+    )
+    check(
+        abs(float(pacing_after.get("min_interval_seconds", 0)) - 3.0) < 0.2,
+        f"头里的 `20, 20;w=60` 被换算成 3.0s/次（实际 {pacing_after.get('min_interval_seconds')}s）",
+    )
+    check(
+        "run_end" in [event["type"] for event in events],
+        f"只声明在头里的端点上照样跑完（pacing 从 {pacing_before.get('min_interval_seconds')}s 变为 "
+        f"{pacing_after.get('min_interval_seconds')}s）",
+    )
+    smoke = await client.post(
+        "/api/provider/smoke-test", json=provider("headers-only-limit")
+    )
+    diagnosis = str(smoke.json().get("diagnosis", ""))
+    check(
+        "端点限额已识别" in diagnosis and "3.0s" in diagnosis,
+        f"自检把限额与节奏提前报给用户（{diagnosis[:80]}…）",
+    )
+
+    # ---- ② 额度用尽：不重试，快速失败，文案说清"重试无用" ----
+    quota_run = await upload_paper(client, check, "quota-exhausted")
+    started = await client.post(
+        f"/api/runs/{quota_run}/recon", json={"provider": provider("quota-exhausted")}
+    )
+    check(started.status_code == 200, "额度用尽的端点上阶段 A 能启动")
+    baseline_events, _, _ = await collect_sse(client, f"/api/runs/{quota_run}/events", timeout_s=120)
+    quota_types = [event["type"] for event in baseline_events]
+    end = events_of(baseline_events, "run_end")
+    check(bool(end) and end[0]["data"]["status"] == "failed", "额度用尽如实标记失败")
+    reason = str(end[0]["data"].get("stopped_reason", "")) if end else ""
+    check(
+        "额度" in reason or "余额" in reason,
+        f"文案说清是账号额度问题：{reason[:70]}…",
+    )
+    check(
+        "重试无用" in reason,
+        "并明确告诉用户重试没有用（否则用户会一直重试）",
+    )
+    check(
+        "llm_retry" not in quota_types,
+        f"额度用尽**不重试**（事件里没有 llm_retry；{quota_types[:6]}…）",
+    )
+    if end:
+        seconds = float(end[0]["data"].get("usage", {}).get("seconds", 0))
+        check(seconds < 20, f"没有白等：{seconds:.1f}s 就结束了（若按限流重试会是 60s+）")
+
+    # ---- ③ TPM：按 token 节流 + 给出正确的建议 ----
+    tpm_run = await upload_paper(client, check, "tpm-limited")
+    started = await client.post(
+        f"/api/runs/{tpm_run}/recon", json={"provider": provider("tpm-limited")}
+    )
+    check(started.status_code == 200, "TPM 端点上阶段 A 能启动")
+    tpm_events, _, _ = await collect_sse(client, f"/api/runs/{tpm_run}/events", timeout_s=200)
+    tpm_end = events_of(tpm_events, "run_end")
+    tpm_reason = str(tpm_end[0]["data"].get("stopped_reason", "")) if tpm_end else ""
+    check(bool(tpm_end) and tpm_end[0]["data"]["status"] == "failed", "TPM 端点如实失败")
+    check(
+        "token" in tpm_reason.lower() or "TPM" in tpm_reason,
+        f"文案指出卡的是 token 速率而不是请求次数：{tpm_reason[:80]}…",
+    )
+    check(
+        "拉长请求间隔" in tpm_reason or "减少每次调用的上下文" in tpm_reason,
+        "并给出对 TPM 真正有用的建议（而不是让它去调请求间隔）",
+    )
+    tpm_pacing = (await client.get("/api/health")).json().get("llm_pacing", {})
+    check(
+        int(tpm_pacing.get("token_limit_per_minute", 0)) == 200000,
+        f"从话术里学到 token 限额并启用 token 节流（{tpm_pacing.get('token_limit_per_minute')}/分钟）",
+    )
+
+    # ---- ④ 纯函数层：分类 / 头解析 / token 等待 / 持久化 ----
+    class _FakeError(Exception):
+        def __init__(self, message: str, status: int | None = None) -> None:
+            super().__init__(message)
+            self.status_code = status
+
+    check(
+        providers_module.classify_llm_error(_FakeError("余额不足", 429)) == "quota_exhausted"
+        and providers_module.classify_llm_error(_FakeError("payment required", 402)) == "quota_exhausted"
+        and providers_module.classify_llm_error(_FakeError("200000 tokens per minute", 429)) == "token_limit"
+        and providers_module.classify_llm_error(_FakeError("1分钟内最多请求10次", 429)) == "rate_limit"
+        and providers_module.classify_llm_error(_FakeError("connection reset")) == "other",
+        "错误分类：额度用尽（含 402）/ TPM / 普通限流 / 其他 各归各类",
+    )
+    check(
+        providers_module._interval_from_limit_header("10, 10;w=60") == 6.0
+        and providers_module._interval_from_limit_header("60, 60;w=60") == 1.0
+        and providers_module._token_limit_from_message("Rate limit reached for 200000 tokens per minute") == 200000.0,
+        "标准响应头与话术都能换算成节奏/token 限额",
+    )
+    providers_module.reset_llm_pacing()
+    providers_module._LLM_TOKEN_WINDOW.append((time.monotonic(), 300))
+    check(
+        providers_module._token_wait_seconds(800, 1000, time.monotonic()) > 0
+        and providers_module._token_wait_seconds(100, 1000, time.monotonic()) == 0,
+        "token 节流：窗口内快超限就等、没超就不等（TPM 靠它而不是靠拉长请求间隔）",
+    )
+    providers_module.reset_llm_pacing()
+    pace_file = ROOT / "data" / "llm-pace.json"
+    if pace_file.exists():
+        text = pace_file.read_text(encoding="utf-8")
+        check(
+            "sk-" not in text and "api_key" not in text,
+            "学到的节奏落盘了，且文件里**不含任何密钥**（只存节奏）",
+        )
+    else:
+        check(True, "学到的节奏尚未落盘（本轮没有需要持久化的端点）")
+
+
 async def main() -> int:
     check = Checker("M1 验收")
     mock = start_service("devtools.mock_provider:app", MOCK_PORT)
@@ -425,6 +650,8 @@ async def main() -> int:
             await section_b(check, client)
             await section_c(check, client)
             await section_e(check, client)
+            await section_g(check, client)
+            await section_f(check, client)
 
         await section_d(check)
         return check.finish()

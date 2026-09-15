@@ -170,6 +170,7 @@ export const EVENT_TYPES = [
   "chat_user",
   "chat_reply",
   "budget_warning",
+  "llm_retry",
   "error",
   "run_end",
 ] as const;

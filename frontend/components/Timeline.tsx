@@ -77,6 +77,14 @@ function describe(event: RunEvent): { icon: string; title: string; detail?: stri
       return { icon: "🎯", tone: "text-green-600", title: `定位到：${d.finding?.name ?? d.innovation_id}` };
     case "budget_warning":
       return { icon: "💰", tone: "text-amber-600", title: "预算告警", detail: d.reason };
+    case "llm_retry":
+      // 网关限流：必须让用户看到"在等，不是卡死"（一次定位要几十次调用，很容易撞限额）
+      return {
+        icon: "⏳",
+        tone: "text-amber-600",
+        title: `端点限流，等待 ${d.delay_seconds}s 后重试（第 ${d.attempt} 次）`,
+        detail: String(d.detail ?? "").slice(0, 200),
+      };
     case "error":
       return { icon: "✖", tone: "text-red-600", title: `错误：${d.kind}`, detail: d.message };
     case "run_end":

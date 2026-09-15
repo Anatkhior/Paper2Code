@@ -302,6 +302,33 @@ openai-python SDK 形状的请求当 bot 直接 403（同 key 同请求体：SDK
 | 单文件读取 | 3000 token | 工具层截断并标注 |
 
 - **降级不是崩溃**：任何超限都走"用已确认的部分生成 artifact + 写明 `stopped_reason` + coverage 声明"。
+  **失败也同理**（2026-09-15 补）：run 中途因为端点问题抛错时，也要把已经记录下来的结论核验、
+  落盘并发出 `verification_done`，`run_end` 标 `partial=true` —— 用户等了半天（可能还花了钱），
+  不能因为第 20 轮撞上限流就把前 19 轮的成果全丢掉。
+- **端点限额**（2026-09-15 补，两轮）：一次定位/侦察要几十次 LLM 调用（一次 turn 一次请求），
+  而实测某中转站限制「1 分钟最多 10 次，包括失败次数」——20 轮只花 61.6s ≈ 19.5 次/分钟，
+  必然撞限流。判据按「越靠前越权威」分层，目标是**让用户不需要知道自己的限额**：
+  1. **响应头**（不需要用户知道任何东西）：成功响应读
+     `x-ratelimit-limit-requests: 10, 10;w=60`（上限, 突发; 窗口秒）与 `x-ratelimit-limit-tokens`；
+     失败响应读 `retry-after`。**注意取头的路径**：流式响应要从
+     `response.completion_stream.response.headers` 取，异常要从 `exc.litellm_response_headers` 取
+     —— `exc.response.headers` 是空的（实测，写错过一次）。
+  2. **网关话术**：`1分钟内最多请求10次` / `200000 tokens per minute`（中英文、双向语序都认）。
+  3. **配置**：`PAPERLENS_LLM_MAX_REQUESTS_PER_MINUTE=N`（兜底，不再是必须）。
+  4. **兜底阶梯**：窗口感知（10s 起、翻倍到 90s），并按**总等待预算**（180s）而不是「重试 5 次」计数。
+  - **TPM 单独处理**：token/分钟 的限制靠拉长请求间隔没用 → 按最近 60s 已发送 token 节流
+    （`_await_llm_slot` 的 token 分支），并且只重试一次（反复空等没有意义）。
+  - **失败分类**（决定要不要重试）：`rate_limit`（退避重试）/
+    `token_limit`（按 token 节流 + 重试一次 + 建议减少上下文）/
+    `quota_exhausted`（402 或 429+配额/余额：**不重试**，直接说「重试无用：去充值/换 key」）。
+  - 学到的节奏**按端点持久化**（`data/llm-pace.json`，只存节奏不存任何密钥），重启不用重学；
+    `/api/health` 的 `llm_pacing` 与**自检结论**都会报出「当前节奏 + 来源（配置/响应头/话术/学到的）」。
+  - 等待都会通过 `llm_retry` 事件显示（≥10s 才提示，避免刷屏）；`run_start` 的 limits 里也带当前节奏。
+  - **预算可行性预警**：`节奏 × 剩余调用 > 剩余墙钟` 时提前 `budget_warning`——
+    否则修好限流只是把用户推到「预算用尽」那堵墙上；预算本身不自动放宽（那是用户设的护栏），
+    但停下来的原因会注明「其中 N 秒花在端点限额等待上」。
+  - **关掉 SDK 自己的隐式重试**（`num_retries=0`）：实测 openai SDK 默认会静默重试 429，
+    于是「撞了限流」在时间线上完全看不见，而且它不认识我们学到的节奏。
 - **取消**：`POST /api/runs/{id}/cancel` → 中断 LLM 流 + 终止 git 子进程 + 标记 run 为 `cancelled`（已产出的 findings 仍然交付）。
 - **幂等 / 缓存**：`run_key = sha256(pdf_sha256 + repo_url + commit_sha + prompt_version + model)`。命中则**回放 `events.jsonl`**，用户看到完整时间线且不花一分钱。
 - **版本锚定**：artifact 里必须固化 `commit_sha`，并在 UI 上显示。否则三个月后你的解读全部腐烂。

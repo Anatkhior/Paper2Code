@@ -109,9 +109,13 @@ def _budget() -> Budget:
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
+    from .providers import llm_pacing_status
+
     return {
         "ok": True,
         "stage": "M2",
+        # 端点的生效节奏（配置/响应头/话术/学到的，谁生效看 source）——用户排障时最想知道的事
+        "llm_pacing": llm_pacing_status(),
         "limits": {
             "max_tool_calls": settings.max_tool_calls,
             "max_input_tokens": settings.max_input_tokens,

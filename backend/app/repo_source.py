@@ -519,17 +519,29 @@ def _git_env() -> dict[str, str]:
 
 
 def run_git(args: list[str], cwd: Path, *, timeout: int = 60) -> subprocess.CompletedProcess[str]:
-    """唯一允许调用 git 的入口：不走 shell、禁 hooks、有超时。"""
+    """唯一允许调用 git 的入口：不走 shell、禁 hooks、有超时。
+
+    超时要翻译成 RepoError：subprocess 抛的 TimeoutExpired 不是本模块的"可预期失败"类型，
+    上层只认 RepoError —— 不翻译的话用户会看到裸的 Python 异常名，
+    验收脚本也会因为"非预期异常"整段崩掉（2026-09-15 实测：ls-remote 卡 20s 就发生了）。
+    """
     command = ["git", "-c", "core.hooksPath=/dev/null", "--no-pager", *args]
-    return subprocess.run(
-        command,
-        cwd=str(Path(cwd).resolve()),
-        env=_git_env(),
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    try:
+        return subprocess.run(
+            command,
+            cwd=str(Path(cwd).resolve()),
+            env=_git_env(),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RepoError(
+            f"git 命令超时（{timeout}s）：{' '.join(str(a) for a in args[:3])}…。"
+            "网络慢或代理卡住时重试即可；克隆/稀疏检出相关超时可用 "
+            "PAPERLENS_REPO_CLONE_TIMEOUT_SECONDS 调大。"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------

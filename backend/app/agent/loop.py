@@ -79,9 +79,43 @@ async def run_agent(
     async def push_text(delta: str) -> None:
         await bus.emit("assistant_text", delta=delta)
 
+    paced_waits: list[float] = []
+    budget_warned_pacing = False
+
+    async def _warn_if_budget_infeasible() -> None:
+        """按当前节奏跑不完预算就提前说，别让用户在"预算用尽"上再撞一次墙。
+
+        限流修好之后，慢节奏会把用户推到另一个墙：端点 3 次/分钟 × 40 次调用 ≈ 13 分钟，
+        超过默认 600s 墙钟。这个提示就是那堵墙的预警（不改预算本身——那是用户有意设的护栏）。
+        """
+        nonlocal budget_warned_pacing
+        if budget_warned_pacing:
+            return
+        from .. import providers
+
+        interval = providers._effective_llm_interval()
+        if interval <= 0:
+            return
+        remaining_calls = max(0, budget.max_tool_calls - budget.tool_calls)
+        expected = remaining_calls * interval
+        remaining_wall = budget.wall_clock_seconds - budget.elapsed
+        if expected > remaining_wall:
+            budget_warned_pacing = True
+            await bus.emit(
+                "budget_warning",
+                reason=(
+                    f"按当前端点节奏（每 {interval:.1f}s 一次调用），剩余 {remaining_calls} 次调用约需 "
+                    f"{expected / 60:.1f} 分钟，而墙钟预算只剩 {remaining_wall / 60:.1f} 分钟 —— "
+                    "这轮很可能跑不完。要么调大 PAPERLENS_WALL_CLOCK_SECONDS，要么换限额更宽的端点。"
+                ),
+                used=budget.snapshot(),
+            )
+
     try:
         while True:
             reason = budget.exceeded(time.monotonic())
+            if reason and paced_waits:
+                reason += f"（其中 {sum(paced_waits):.0f}s 花在端点限额等待上）"
             if reason:
                 stopped_reason = reason
                 await bus.emit("budget_warning", reason=reason, used=budget.snapshot())
@@ -95,7 +129,24 @@ async def run_agent(
             await bus.emit("step_start", turn=turn)
 
             budget.input_tokens += estimate_tokens(messages, tool_schemas)
-            result = await stream_turn(cfg, messages, tool_schemas, on_text=push_text)
+
+            async def _on_llm_retry(
+                attempt: int, delay: float, detail: str, reason: str = ""
+            ) -> None:
+                """端点限额相关的一切等待都要看得见：用户在时间线上看到「在等，不是卡死」。"""
+                paced_waits.append(delay)
+                await bus.emit(
+                    "llm_retry",
+                    attempt=attempt,
+                    delay_seconds=round(delay, 1),
+                    reason=reason or "rate_limit",
+                    detail=detail[:200],
+                )
+                await _warn_if_budget_infeasible()
+
+            result = await stream_turn(
+                cfg, messages, tool_schemas, on_text=push_text, on_retry=_on_llm_retry
+            )
             last_text = result.text
             budget.output_tokens += estimate_tokens([{"role": "assistant", "content": result.text}])
 
@@ -214,15 +265,35 @@ async def run_agent(
         raise
     except Exception as exc:  # noqa: BLE001
         status = "failed"
-        stopped_reason = f"{type(exc).__name__}"
+        stopped_reason = _failure_reason(exc)
         await bus.emit("error", kind=type(exc).__name__, message=str(exc)[:500])
-        await bus.emit("run_end", status=status, stopped_reason=stopped_reason, usage=budget.snapshot())
-        return {
+        # **失败也要交付**：把已经记录下来的结论核验、落盘、发出 verification_done，
+        # 全部赶在 run_end 之前。理由和"预算超限不是崩溃、而是用已确认的部分交付"一样：
+        # 用户等了半天（可能还花了钱），不能因为第 20 轮撞上限流就把前 19 轮的成果全丢掉。
+        summary = {
             "status": status,
             "stopped_reason": stopped_reason,
+            "turns": turn,
+            "coverage_note": coverage_note,
+            "usage": budget.snapshot(),
             "final_text": last_text,
             "tools_used": tools_used,
+            "plan": ctx.state.get("plan"),
+            "findings": ctx.state.get("findings"),
+            "partial": True,
         }
+        if finalize is not None:
+            try:
+                summary.update(await finalize(summary))
+            except Exception as finalize_exc:  # noqa: BLE001
+                await bus.emit(
+                    "error",
+                    kind=f"finalize:{type(finalize_exc).__name__}",
+                    message=str(finalize_exc)[:500],
+                )
+                summary.setdefault("finalize_error", str(finalize_exc)[:300])
+        await bus.emit("run_end", **summary)
+        return summary
 
     summary = {
         "status": status,
@@ -256,3 +327,15 @@ async def run_agent(
 def _summarize(content: str, limit: int = 300) -> str:
     text = content.strip().replace("\n", " ")
     return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _failure_reason(exc: Exception) -> str:
+    """失败原因要说人话（运行失败时用户唯一能看到的解释）。
+
+    限流是最常见的一种，而且是"用户能自己解决"的那种（设限额或换端点），
+    所以这里用 providers 的诊断文案，而不是干巴巴地甩一个 RateLimitError。
+    """
+    from .. import providers
+
+    diagnosis = providers._diagnose_exception(exc)
+    return f"{type(exc).__name__}：{diagnosis}"

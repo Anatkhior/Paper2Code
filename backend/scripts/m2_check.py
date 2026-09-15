@@ -1065,6 +1065,54 @@ async def section_f(check: Checker, client: httpx.AsyncClient) -> None:
 # ---------------------------------------------------------------------------
 # D. 失败路径
 # ---------------------------------------------------------------------------
+async def section_i(check: Checker, client: httpx.AsyncClient) -> None:
+    """限流导致中途失败时，**已定位到的结论必须照样交付**（2026-09-15 用户实测）。
+
+    用户那次跑了 20 轮（35 次工具调用、61.6s）撞上网关限额，run 直接 failed —— 前面
+    19 轮定位到的东西全丢了，等于"一次完整的体验都没有"。这一节钉住：
+    失败路径也要走 finalize（核验 + 落盘 + verification_done），并且如实标注 partial。
+    """
+    from app import providers as providers_module
+    from app.config import settings
+
+    check.section("I. 网关限流导致失败时：已确认的部分照样交付")
+
+    providers_module.reset_llm_pacing()
+    saved_retries = settings.llm_max_retries
+    try:
+        settings.llm_max_retries = 1                  # 断言要快：退避一次就放弃
+        # 侦察用普通 mock（先拿到清单），定位用限流变体：它在第 4 轮工具结果之后一直 429
+        # —— 那一刻第一条结论已经 record_finding 过了，正好检验"交付已确认的部分"。
+        run_id = await prepare_run(client, check, "mock-model")
+        events = await locate(client, check, run_id, "rate-limited-late-4")
+        types = [event["type"] for event in events]
+        end = events_of(events, "run_end")
+        check(bool(end), "持续限流最终以 run_end 收尾（不会挂住）")
+        if end:
+            summary = end[0]["data"]
+            check(summary["status"] == "failed", f"如实标记失败（status={summary['status']}）")
+            check(
+                "限流" in str(summary.get("stopped_reason", "")),
+                f"失败原因指得出是限流：{str(summary.get('stopped_reason'))[:80]}…",
+            )
+            check(summary.get("partial") is True, "标记为 partial（前端能区分'跑完'与'只交付一部分'）")
+        # 关键三连：核验事件、产物、引用状态——失败不该让它们消失
+        check("verification_done" in types, "失败路径也发了 verification_done（已确认的引用被核验过）")
+        check("error" in types, "错误事件在 run_end 之前发出（用户看得见失败原因）")
+        detail = await client.get(f"/api/runs/{run_id}")
+        artifact = detail.json().get("artifact") or {}
+        findings = artifact.get("innovations") or []
+        check(
+            bool(findings),
+            f"失败时已定位到的结论仍然交付（{len(findings)} 条，不是一片空白）",
+        )
+        check(
+            isinstance(artifact.get("verification"), dict),
+            "交付的产物带核验结果（不是「没验过就给你」）",
+        )
+    finally:
+        settings.llm_max_retries = saved_retries
+        providers_module.reset_llm_pacing()
 async def section_d(check: Checker, prepared_run_id: str) -> None:
     check.section("D. 失败路径")
     from app.config import settings
@@ -1144,6 +1192,7 @@ async def main() -> int:
             await section_e(check, client)
             await section_f(check, client)
             await section_g(check, client)
+            await section_i(check, client)
 
         await section_d(check, prepared_run_id)
         return check.finish()

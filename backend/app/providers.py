@@ -13,6 +13,8 @@ import asyncio
 import json
 import re
 import time
+from collections import deque
+from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Literal
 
 import litellm
@@ -240,12 +242,483 @@ def _llm_headers() -> dict[str, str] | None:
     return {"User-Agent": settings.http_user_agent}
 
 
+# ---------------------------------------------------------------------------
+# 端点限额（RPM / TPM / 额度用尽）：权威信号优先 + 兜底节流 + 分类报错
+# ---------------------------------------------------------------------------
+# 为什么必须做：一次定位/侦察要几十次 LLM 调用（一次 turn 一次请求）。实测某中转站
+# 限制「1 分钟最多 10 次，含失败次数」，用户那次 20 轮只花 61.6s ≈ 19.5 次/分钟 → 必然撞；
+# 而旧代码撞到 429 直接让整个 run failed，前面跑出来的东西全丢。
+#
+# 判据按"越靠前越权威"排序（尽量不猜，也尽量不要求用户知道自己的限额）：
+#   1. 配置：PAPERLENS_LLM_MAX_REQUESTS_PER_MINUTE（用户知道限额时最省事）
+#   2. **响应头**（不需要用户知道任何东西）：
+#      成功响应 → x-ratelimit-limit-requests: `10, 10;w=60`（上限, 突发; 窗口秒）、
+#                 x-ratelimit-limit-tokens（token/分钟）
+#      失败响应 → litellm_response_headers 里的 retry-after
+#      注意：流式响应要把头从 `response.completion_stream.response.headers` 里取，
+#      异常要从 `exc.litellm_response_headers` 取——实测 `exc.response.headers` 是**空的**
+#      （2026-09-15 踩过：写了读头的分支却读不到，只有中文话术那层侥幸生效）
+#   3. 网关话术：`1分钟内最多请求10次`（中英文都认）
+#   4. 兜底：窗口感知阶梯（10s 起、翻倍到 90s），按"总等待预算"而非"5 次"计数
+#
+# 三类要分开对待（不同用户会撞不同的墙）：
+#   - transient 限流（RPM）→ 退避重试 + 学会节奏，之后自动降速
+#   - TPM（token/分钟）→ 按请求降速**没用**，要按 token 节流：用声明的/学到的
+#     limit-tokens + 最近 60s 已发送 token 决定是否要等
+#   - 额度用尽/欠费（402 或 429 + quota/余额话术）→ 重试永远不会成功，**不重试**，直接说清
+TOKEN_WINDOW_SECONDS = 60.0
+FALLBACK_FIRST_DELAY = 10.0
+FALLBACK_MAX_DELAY = 90.0
+RETRY_TOTAL_WAIT_SECONDS = 180.0     # 重试总等待预算（比"重试几次"更贴近真实窗口）
+PACE_FILE_NAME = "llm-pace.json"     # 学到的节奏落盘：重启不用重学（不含任何密钥）
+NOTICE_WAIT_SECONDS = 10.0           # 只有等得久才打扰用户（否则每次调用都刷屏）
+
+_LLM_PACE_LOCK = asyncio.Lock()
+_LLM_LAST_CALL_AT = 0.0
+_LLM_LEARNED_INTERVAL_SECONDS = 0.0      # 两次请求最小间隔（≥ 配置值）
+_LLM_LEARNED_TOKEN_LIMIT = 0.0           # token/分钟
+_LLM_PACE_SOURCE = "none"                # config / header / prose / learned / none
+_LLM_TOKEN_SOURCE = "none"
+_LLM_TOKEN_WINDOW: deque[tuple[float, int]] = deque()   # (monotonic, tokens)
+_RATE_LIMIT_HINTS: list[float] = []      # 最近几次被限流建议的等待（展示/断言用）
+_PACE_CACHE: dict[str, dict[str, float]] = {}
+_PACE_LOADED = False
+
+QUOTA_MARKERS = (
+    "insufficient", "quota", "balance", "credit", "billing", "exceeded your current",
+    "余额", "配额", "欠费", "额度不足", "已用完", "免费额度",
+)
+TOKEN_LIMIT_MARKERS = (
+    "tokens per minute", "token per min", "tokens_per_minute", "tpm",
+    "token rate limit", "令牌", "token 速率",
+)
+
+
+def reset_llm_pacing() -> None:
+    """清掉学到的节奏与 token 窗口（验收脚本用；正常运行时不需要）。"""
+    global _LLM_LEARNED_INTERVAL_SECONDS, _LLM_LEARNED_TOKEN_LIMIT, _LLM_LAST_CALL_AT
+    global _LLM_PACE_SOURCE, _LLM_TOKEN_SOURCE, _PACE_LOADED
+    _LLM_LEARNED_INTERVAL_SECONDS = 0.0
+    _LLM_LEARNED_TOKEN_LIMIT = 0.0
+    _LLM_LAST_CALL_AT = 0.0
+    _LLM_PACE_SOURCE = "none"
+    _LLM_TOKEN_SOURCE = "none"
+    _LLM_TOKEN_WINDOW.clear()
+    _RATE_LIMIT_HINTS.clear()
+    _PACE_CACHE.clear()
+    _PACE_LOADED = True        # 验收里不要再从磁盘加载，避免互相污染
+
+
+def classify_llm_error(exc: Exception) -> str:
+    """把端点错误分成四类，**重试策略按类决定**。
+
+    quota_exhausted 是最要紧的一类：它长得像限流（很多网关就用 429），但重试永远不会
+    成功——用户该做的是充值/换 key，而不是等我们白等一分钟再失败。
+    """
+    name = type(exc).__name__.lower()
+    text = str(exc)
+    lowered = text.lower()
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if status == 402 or any(marker in lowered for marker in QUOTA_MARKERS):
+        return "quota_exhausted"
+    if any(marker in lowered for marker in TOKEN_LIMIT_MARKERS):
+        return "token_limit"
+    if status == 429 or "ratelimit" in name or "rate limit" in lowered or "429" in lowered or "请求数限制" in text:
+        return "rate_limit"
+    return "other"
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    return classify_llm_error(exc) in {"rate_limit", "token_limit"}
+
+
+# ---- 响应头：权威信号 ------------------------------------------------------
+def _headers_from_response(response: Any) -> Any | None:
+    """成功响应上的响应头（流式对象把 httpx.Response 藏在 completion_stream 里）。"""
+    for candidate in (
+        getattr(getattr(response, "completion_stream", None), "response", None),
+        getattr(response, "response", None),
+        getattr(response, "_response", None),
+        response,
+    ):
+        headers = getattr(candidate, "headers", None)
+        if headers:
+            return headers
+    return None
+
+
+def _headers_from_exception(exc: Exception) -> Any | None:
+    """异常上的响应头：litellm 放在 `litellm_response_headers`（实测）。"""
+    for attr in ("litellm_response_headers", "headers"):
+        headers = getattr(exc, attr, None)
+        if headers:
+            return headers
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    return headers or None
+
+
+def _interval_from_limit_header(raw: str) -> float | None:
+    """`10, 10;w=60` → 窗口 60s / 上限 10 次 = 6s。"""
+    head = str(raw).split(",")[0].strip()
+    try:
+        limit = float(head)
+    except ValueError:
+        return None
+    window = TOKEN_WINDOW_SECONDS
+    match = re.search(r"w\s*=\s*(\d+)", str(raw))
+    if match:
+        window = float(match.group(1))
+    if limit <= 0 or window <= 0:
+        return None
+    return window / limit
+
+
+def _tokens_per_minute_from_header(raw: str) -> float | None:
+    head = str(raw).split(",")[0].strip()
+    try:
+        limit = float(head)
+    except ValueError:
+        return None
+    window = TOKEN_WINDOW_SECONDS
+    match = re.search(r"w\s*=\s*(\d+)", str(raw))
+    if match:
+        window = float(match.group(1))
+    if limit <= 0 or window <= 0:
+        return None
+    return limit * (60.0 / window)
+
+
+def _parse_limit_headers(headers: Any) -> dict[str, float]:
+    def _get(name: str) -> str | None:
+        try:
+            value = headers.get(name) if headers is not None else None
+        except Exception:  # noqa: BLE001
+            return None
+        return str(value) if value else None
+
+    found: dict[str, float] = {}
+    retry_after = _get("retry-after")
+    if retry_after:
+        try:
+            found["retry_after"] = max(0.2, min(float(retry_after.rstrip("s")), 120.0))
+        except ValueError:
+            pass
+    limit_requests = _get("x-ratelimit-limit-requests")
+    if limit_requests:
+        interval = _interval_from_limit_header(limit_requests)
+        if interval:
+            found["request_interval"] = interval
+    limit_tokens = _get("x-ratelimit-limit-tokens")
+    if limit_tokens:
+        tpm = _tokens_per_minute_from_header(limit_tokens)
+        if tpm:
+            found["tokens_per_minute"] = tpm
+    remaining = _get("x-ratelimit-remaining-requests")
+    if remaining:
+        try:
+            found["remaining_requests"] = float(str(remaining).split(",")[0])
+        except ValueError:
+            pass
+    return found
+
+
+def _pace_path() -> Path:
+    return settings.data_dir / PACE_FILE_NAME
+
+
+def _load_pace_cache() -> None:
+    global _PACE_LOADED, _PACE_CACHE
+    if _PACE_LOADED:
+        return
+    _PACE_LOADED = True
+    try:
+        raw = json.loads(_pace_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if isinstance(raw, dict):
+        _PACE_CACHE = {str(k): v for k, v in raw.items() if isinstance(v, dict)}
+
+
+def _persist_pace() -> None:
+    """把学到的节奏写盘（**只存节奏，不存 key/token**）。失败不影响运行。"""
+    try:
+        path = _pace_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        trimmed = dict(list(_PACE_CACHE.items())[-50:])
+        path.write_text(json.dumps(trimmed, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def apply_pace_for_key(key: str) -> None:
+    """用过的端点：把上次学到的节奏先装上（重启后不用重新撞一次）。"""
+    global _LLM_PACE_SOURCE, _LLM_TOKEN_SOURCE
+    _load_pace_cache()
+    saved = _PACE_CACHE.get(key)
+    if not saved:
+        return
+    interval = float(saved.get("request_interval") or 0)
+    tpm = float(saved.get("tokens_per_minute") or 0)
+    if interval > 0:
+        _learn_interval(interval, source="learned")
+    if tpm > 0:
+        _learn_token_limit(tpm, source="learned")
+
+
+def _learn_interval(interval: float, *, source: str, key: str | None = None) -> None:
+    global _LLM_LEARNED_INTERVAL_SECONDS, _LLM_PACE_SOURCE
+    if interval <= 0:
+        return
+    _LLM_LEARNED_INTERVAL_SECONDS = max(_LLM_LEARNED_INTERVAL_SECONDS, interval)
+    if _LLM_PACE_SOURCE != "config":
+        _LLM_PACE_SOURCE = source
+    if key:
+        _load_pace_cache()
+        entry = _PACE_CACHE.setdefault(key, {})
+        entry["request_interval"] = max(float(entry.get("request_interval") or 0), interval)
+        _persist_pace()
+
+
+def _learn_token_limit(tpm: float, *, source: str, key: str | None = None) -> None:
+    global _LLM_LEARNED_TOKEN_LIMIT, _LLM_TOKEN_SOURCE
+    if tpm <= 0:
+        return
+    _LLM_LEARNED_TOKEN_LIMIT = tpm
+    _LLM_TOKEN_SOURCE = source
+    if key:
+        _load_pace_cache()
+        entry = _PACE_CACHE.setdefault(key, {})
+        entry["tokens_per_minute"] = tpm
+        _persist_pace()
+
+
+def _learn_from_headers(headers: Any, *, key: str | None = None) -> dict[str, float]:
+    found = _parse_limit_headers(headers)
+    if "request_interval" in found:
+        _learn_interval(found["request_interval"], source="header", key=key)
+    if "tokens_per_minute" in found:
+        _learn_token_limit(found["tokens_per_minute"], source="header", key=key)
+    return found
+
+
+def _rate_limit_interval_from_message(text: str) -> float | None:
+    """从网关话术里读出限额（中英文都认），换算成"两次请求最小间隔"。
+
+    实测话术：「您已达到总请求数限制：1分钟内最多请求10次，包括失败次数，请检查您的请求是否正确」
+    → 60s / 10 次 = 6s。读不出来就返回 None（那就用兜底阶梯）。
+    """
+    window: float | None = None
+    match = re.search(r"(\d+)\s*(?:分钟|minutes?|min\b)", text, re.IGNORECASE)
+    if match:
+        window = float(match.group(1)) * 60
+    else:
+        match = re.search(r"(\d+)\s*(?:秒|seconds?|sec\b)", text, re.IGNORECASE)
+        if match:
+            window = float(match.group(1))
+        elif re.search(r"(?:分钟|minutes?|per\s+min)", text, re.IGNORECASE):
+            window = 60.0        # 只说了"每分钟"，没说窗口长度 → 按一分钟算
+        elif re.search(r"(?:per\s+sec|每秒|/\s*s\b)", text, re.IGNORECASE):
+            window = 1.0
+    limit_match = re.search(r"(\d+)\s*(?:次|requests?|reqs?\b)", text, re.IGNORECASE)
+    if not window or not limit_match:
+        return None
+    limit = int(limit_match.group(1))
+    if limit <= 0:
+        return None
+    return window / limit
+
+
+def _token_limit_from_message(text: str) -> float | None:
+    """从话术里读 token/分钟 限额。
+
+    实测话术：`Rate limit reached for 200000 tokens per minute (TPM)` → 200000。
+    也认「每分钟 200000 tokens」「token 上限 200000/分钟」这类语序。
+    """
+    patterns = (
+        r"(\d[\d,]*)\s*tokens?\s*(?:per|/)\s*(?:min|minute)",
+        r"(?:per|/)\s*(?:min|minute)[^\d]{0,12}(\d[\d,]*)\s*tokens?",
+        r"每分钟[^\d]{0,8}(\d[\d,]*)\s*(?:个)?\s*tokens?",
+        r"(\d[\d,]*)\s*(?:个)?\s*tokens?\s*(?:每|/)\s*分钟",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            try:
+                value = float(match.group(1).replace(",", ""))
+            except ValueError:
+                continue
+            if value > 0:
+                return value
+    return None
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    """优先问响应头（retry-after 最准），拿不到再返回 None。"""
+    found = _parse_limit_headers(_headers_from_exception(exc))
+    return found.get("retry_after")
+
+
+def _clamp_delay(delay: float) -> float:
+    return max(0.2, min(float(delay), FALLBACK_MAX_DELAY))
+
+
+def _retry_delay(exc: Exception, rounds: int, kind: str, *, key: str | None = None) -> float:
+    """这次该等多久：retry-after > 响应头声明的限额 > 网关话术 > 窗口感知兜底阶梯。"""
+    header_delay = _retry_after_seconds(exc)
+    parsed = _rate_limit_interval_from_message(str(exc))
+    if parsed:
+        _learn_interval(parsed, source="prose", key=key)
+    if header_delay:
+        delay = _clamp_delay(header_delay)
+    elif parsed:
+        delay = _clamp_delay(parsed)
+    else:
+        delay = _clamp_delay(FALLBACK_FIRST_DELAY * (2 ** rounds))   # 10/20/40/80…
+    if kind == "token_limit":
+        tpm = _token_limit_from_message(str(exc))
+        if tpm:
+            _learn_token_limit(tpm, source="prose", key=key)
+        delay = max(delay, 30.0)          # token 窗口通常要等一个窗口才恢复
+    _RATE_LIMIT_HINTS.append(delay)
+    return delay
+
+
+def _effective_llm_interval() -> float:
+    """生效的"两次请求最小间隔"：配置与学到值取大。"""
+    configured = 0.0
+    if settings.llm_max_requests_per_minute > 0:
+        configured = 60.0 / settings.llm_max_requests_per_minute
+        global _LLM_PACE_SOURCE
+        if _LLM_PACE_SOURCE == "none":
+            _LLM_PACE_SOURCE = "config"
+    return max(configured, _LLM_LEARNED_INTERVAL_SECONDS)
+
+
+def _effective_token_limit() -> float:
+    return _LLM_LEARNED_TOKEN_LIMIT
+
+
+def llm_pacing_status() -> dict[str, Any]:
+    """给 /api/health 与自检看的"当前节奏 + 来源"。"""
+    interval = _effective_llm_interval()
+    return {
+        "min_interval_seconds": round(interval, 2),
+        "requests_per_minute": round(60.0 / interval, 1) if interval > 0 else 0,
+        "token_limit_per_minute": int(_effective_token_limit()),
+        "source": _LLM_PACE_SOURCE,
+        "token_source": _LLM_TOKEN_SOURCE,
+        "configured_requests_per_minute": settings.llm_max_requests_per_minute,
+        "max_retries": _llm_retry_limit(),
+        "total_wait_budget_seconds": RETRY_TOTAL_WAIT_SECONDS,
+    }
+
+
+def _tokens_in_window(now: float) -> int:
+    while _LLM_TOKEN_WINDOW and now - _LLM_TOKEN_WINDOW[0][0] > TOKEN_WINDOW_SECONDS:
+        _LLM_TOKEN_WINDOW.popleft()
+    return sum(tokens for _, tokens in _LLM_TOKEN_WINDOW)
+
+
+def _token_wait_seconds(tokens: int, tpm: float, now: float) -> float:
+    """按 token 限额还要等多久（TPM 限流靠这个，而不是靠拉长请求间隔）。"""
+    if tokens <= 0 or tpm <= 0:
+        return 0.0
+    used = _tokens_in_window(now)
+    if used + tokens <= tpm:
+        return 0.0
+    if not _LLM_TOKEN_WINDOW:
+        return 0.0
+    oldest = _LLM_TOKEN_WINDOW[0][0]
+    return max(0.0, TOKEN_WINDOW_SECONDS - (now - oldest)) + 0.1
+
+
+async def _await_llm_slot(tokens: int = 0, on_wait: Any = None) -> None:
+    """客户端节流：请求间隔 + token 限额。等得久（≥10s）就告诉用户，避免像卡死。"""
+    global _LLM_LAST_CALL_AT
+    interval = _effective_llm_interval()
+    tpm = _effective_token_limit()
+    async with _LLM_PACE_LOCK:
+        now = time.monotonic()
+        if interval > 0:
+            wait = interval - (now - _LLM_LAST_CALL_AT)
+            if wait > 0:
+                await _sleep_and_notice(wait, "requests", on_wait)
+        wait = _token_wait_seconds(tokens, tpm, time.monotonic())
+        if wait > 0:
+            await _sleep_and_notice(wait, "tokens", on_wait)
+        _LLM_LAST_CALL_AT = time.monotonic()
+        if tokens > 0 and tpm > 0:
+            _LLM_TOKEN_WINDOW.append((time.monotonic(), tokens))
+
+
+async def _sleep_and_notice(seconds: float, reason: str, on_wait: Any) -> None:
+    if on_wait is not None and seconds >= NOTICE_WAIT_SECONDS:
+        try:
+            await on_wait(reason, seconds)
+        except Exception:  # noqa: BLE001 —— 报告进度不许弄死请求
+            pass
+    await asyncio.sleep(seconds)
+
+
+def _llm_retry_limit() -> int:
+    return max(0, int(settings.llm_max_retries))
+
+
+async def _completion_with_retries(
+    kwargs: dict[str, Any], on_retry: Any, *, pace_key: str | None = None, tokens: int = 0
+) -> Any:
+    """发一次 LLM 请求：节流 + 按类重试（额度用尽不重试）+ stream_options 兼容回退。"""
+    max_rounds = _llm_retry_limit()
+
+    async def _notify_wait(reason: str, seconds: float) -> None:
+        if on_retry is not None:
+            await on_retry(0, seconds, f"按端点限额等待（{reason}）", reason)
+
+    waited = 0.0
+    rounds = 0
+    while True:
+        await _await_llm_slot(tokens, _notify_wait)
+        try:
+            response = await litellm.acompletion(**kwargs)
+        except Exception as exc:  # noqa: BLE001
+            kind = classify_llm_error(exc)
+            if kind == "quota_exhausted":
+                raise                     # 重试永远不会成功：直接让上层说清
+            if kind in {"rate_limit", "token_limit"}:
+                # 失败响应上也可能带限流头（最权威），先学再决定等多久
+                _learn_from_headers(_headers_from_exception(exc), key=pace_key)
+                # TPM 只重试一次：token 窗口不是"等几秒"能恢复的，反复空等只会让用户干瞪眼
+                # （正确的出路是减少上下文或换 key，文案里已经写了）
+                allowed = 1 if kind == "token_limit" else max_rounds
+                if rounds >= allowed or waited >= RETRY_TOTAL_WAIT_SECONDS:
+                    raise
+                delay = _retry_delay(exc, rounds, kind, key=pace_key)
+                rounds += 1
+                waited += delay
+                if on_retry is not None:
+                    try:
+                        await on_retry(rounds, delay, str(exc)[:300], kind)
+                    except Exception:  # noqa: BLE001 —— 报告进度不许弄死请求
+                        pass
+                await asyncio.sleep(delay)
+                continue
+            lowered = str(exc).lower()
+            if "stream_options" in lowered or "include_usage" in lowered or "unrecognized" in lowered:
+                kwargs.pop("stream_options", None)
+                continue
+            raise
+        _learn_from_headers(_headers_from_response(response), key=pace_key)
+        return response
+
+
 async def stream_turn(
     cfg: ProviderConfig,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
     *,
     on_text: Callable[[str], Awaitable[None]] | None = None,
+    on_retry: Callable[[int, float, str, str], Awaitable[None]] | None = None,
     timeout: int | None = None,
     temperature: float = 0.2,
 ) -> TurnResult:
@@ -253,6 +726,9 @@ async def stream_turn(
 
     timeout 缺省取 PAPERLENS_PER_TURN_TIMEOUT_SECONDS（§8：单次调用不许卡死整个 run）；
     自检场景会显式传更短的值。
+
+    限流（429）在这里统一处理：先按客户端节奏等一个空位，撞到限流就退避重试，
+    并通过 on_retry 让上层把它显示给用户（见 _await_llm_slot / _retry_delay）。
     """
     if timeout is None:
         timeout = settings.per_turn_timeout_seconds
@@ -278,17 +754,20 @@ async def stream_turn(
     # 有些端点不认识这个字段，所以失败时退一步重试一次，而不是让它把整个请求搞挂。
     kwargs["stream_options"] = {"include_usage": True}
 
+    # 关掉 SDK 自己的隐式重试：实测 openai SDK 默认会对 429 静默重试（max_retries=2），
+    # 于是"撞了限流"这件事在时间线上完全看不见（用户只看到卡住），
+    # 而且它不知道我们后来学到的端点节奏。重试统一由 _completion_with_retries 负责：
+    # 会读 retry-after、会限速、会发 llm_retry 事件、也会在放弃时如实报错。
+    kwargs["num_retries"] = 0
+
     acc = _Accumulator()
     started = time.monotonic()
-    try:
-        response = await litellm.acompletion(**kwargs)
-    except Exception as exc:  # noqa: BLE001
-        lowered = str(exc).lower()
-        if "stream_options" in lowered or "include_usage" in lowered or "unrecognized" in lowered:
-            kwargs.pop("stream_options", None)
-            response = await litellm.acompletion(**kwargs)
-        else:
-            raise
+    # 端点身份（base_url + model）：学到的节奏按它持久化（**不含 api_key**）
+    pace_key = f"{cfg.base_url or 'default'}|{cfg.model}"
+    apply_pace_for_key(pace_key)
+    response = await _completion_with_retries(
+        kwargs, on_retry, pace_key=pace_key, tokens=estimate_tokens(messages, tools)
+    )
     async for chunk in response:
         new_text = acc.absorb(chunk)
         if new_text and on_text is not None:
@@ -449,9 +928,26 @@ async def smoke_test(cfg: ProviderConfig, timeout: int = 90) -> SmokeResult:
             provider=cfg.safe_label(),
         )
 
+    # 自检通过时顺手把"这个端点的限额/节奏"报出来：用户**在跑之前**就知道会不会撞上限流
+    pacing = llm_pacing_status()
+    capabilities["llm_pacing"] = pacing
+    diagnosis = "通过：支持流式输出 + function calling + 工具结果回传。"
+    if pacing["min_interval_seconds"] > 0:
+        source_cn = {
+            "config": "来自你的配置",
+            "header": "来自端点响应头",
+            "prose": "来自端点的错误话术",
+            "learned": "来自上次学到的节奏",
+        }.get(str(pacing["source"]), str(pacing["source"]))
+        diagnosis += (
+            f"另外：端点限额已识别（{source_cn}）——每 {pacing['min_interval_seconds']}s 一次调用"
+            f"（约 {pacing['requests_per_minute']} 次/分钟），本轮会按这个节奏发请求。"
+        )
+        if pacing["token_limit_per_minute"]:
+            diagnosis += f"token 限额约 {pacing['token_limit_per_minute']}/分钟。"
     return SmokeResult(
         ok=True,
-        diagnosis="通过：支持流式输出 + function calling + 工具结果回传。",
+        diagnosis=diagnosis,
         capabilities=capabilities,
         steps=steps,
         provider=cfg.safe_label(),
@@ -521,8 +1017,32 @@ def _diagnose_exception(exc: Exception) -> str:
         return "超时：端点在该时间内没有任何响应。"
     if "connection" in name.lower() or "connect" in lowered:
         return "连不上 base_url：检查地址、网络，以及该服务是否允许从这里访问。"
-    if "ratelimit" in name.lower() or "429" in lowered:
-        return "被限流（429）：稍后重试，或换一个 key。"
+    kind = classify_llm_error(exc)
+    if kind == "quota_exhausted":
+        return (
+            "账号额度/余额用尽（不是限流，**重试无用**）：去充值、换 key 或换端点。"
+            f"已跑出来的部分不会丢（失败也会交付已核验的结论）。原始信息：{_clean(text)[:160]}"
+        )
+    if kind == "token_limit":
+        return (
+            "被 token 速率限制（TPM）：这种限制卡的是 token 而不是请求次数，所以「拉长请求间隔」"
+            "帮助有限。可行的办法：① 减少每次调用的上下文（少勾几条目标、少让模型一次读很多页）；"
+            "② 换一个 TPM 更高的 key/端点。已跑出来的部分不会丢。"
+            f"原始信息：{_clean(text)[:160]}"
+        )
+    if kind == "rate_limit":
+        interval = _effective_llm_interval()
+        clause = (
+            f"当前节奏：每 {interval:.1f}s 一次调用（来源 {_LLM_PACE_SOURCE}）。"
+            if interval > 0
+            else "端点没有声明限额，也没给出可解析的话术，只能靠退避。"
+        )
+        return (
+            f"被限流（429）：一次定位/侦察要几十次调用，很容易撞上限。{clause}"
+            "办法：① 设 PAPERLENS_LLM_MAX_REQUESTS_PER_MINUTE=<你的限额>（例如 10）；"
+            "② 换限额更宽的端点。已跑出来的部分不会丢（失败也会交付已核验的结论）。"
+            f"原始信息：{_clean(text)[:160]}"
+        )
     if "badrequest" in name.lower() or "400" in lowered:
         return f"请求被拒绝（400）：通常是该端点不支持本次请求里的某个字段。原始信息：{_clean(text)}"
     return f"{name}：{_clean(text)}"
@@ -564,6 +1084,7 @@ async def probe_endpoint(cfg: ProviderConfig, timeout: int = 12) -> dict[str, An
             entry: dict[str, Any] = {"url": url}
             try:
                 response = await client.get(url, headers=headers)
+                _learn_from_headers(getattr(response, "headers", None))
                 body = response.text or ""
                 entry["status"] = response.status_code
                 entry["content_type"] = response.headers.get("content-type", "")
