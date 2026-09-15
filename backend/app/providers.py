@@ -292,6 +292,18 @@ TOKEN_LIMIT_MARKERS = (
     "tokens per minute", "token per min", "tokens_per_minute", "tpm",
     "token rate limit", "令牌", "token 速率",
 )
+# 网络/网关侧的瞬时故障：**重试往往就好了**（实测用户跑到第 10 轮时遇到
+# `InternalServerError: Connection error.`，旧代码归到"其他" → 直接失败、整轮作废）。
+# 刻意**不包含超时**：超时意味着"端点太慢"，重试只会在同一个时限上再等一遍，
+# 而 per_turn_timeout_seconds 是用户设的护栏（自检也靠它判定慢端点）。
+TRANSIENT_MARKERS = (
+    "connection error", "connection reset", "connection aborted", "connection refused",
+    "server disconnected", "remote protocol", "eof occurred", "broken pipe",
+    "temporarily unavailable", "bad gateway", "service unavailable", "gateway time-out",
+    "gateway timeout", "internal server error", "connection closed",
+    "连接中断", "连接被重置", "服务不可用", "midstream",
+)
+TRANSIENT_STATUSES = (500, 502, 503, 504, 520, 521, 522, 523, 524, 529)
 
 
 def reset_llm_pacing() -> None:
@@ -325,6 +337,8 @@ def classify_llm_error(exc: Exception) -> str:
         return "token_limit"
     if status == 429 or "ratelimit" in name or "rate limit" in lowered or "429" in lowered or "请求数限制" in text:
         return "rate_limit"
+    if status in TRANSIENT_STATUSES or any(marker in lowered for marker in TRANSIENT_MARKERS):
+        return "transient"
     return "other"
 
 
@@ -580,6 +594,9 @@ def _retry_delay(exc: Exception, rounds: int, kind: str, *, key: str | None = No
         if tpm:
             _learn_token_limit(tpm, source="prose", key=key)
         delay = max(delay, 30.0)          # token 窗口通常要等一个窗口才恢复
+    if kind == "transient" and not header_delay:
+        # 网络抖动/网关重启：从 5s 起指数退避（比限流的 10s 起更快，因为通常很快恢复）
+        delay = _clamp_delay(5.0 * (2 ** rounds))
     _RATE_LIMIT_HINTS.append(delay)
     return delay
 
@@ -666,10 +683,15 @@ def _llm_retry_limit() -> int:
 
 
 async def _completion_with_retries(
-    kwargs: dict[str, Any], on_retry: Any, *, pace_key: str | None = None, tokens: int = 0
+    kwargs: dict[str, Any],
+    on_retry: Any,
+    *,
+    pace_key: str | None = None,
+    tokens: int = 0,
+    retries: int | None = None,
 ) -> Any:
     """发一次 LLM 请求：节流 + 按类重试（额度用尽不重试）+ stream_options 兼容回退。"""
-    max_rounds = _llm_retry_limit()
+    max_rounds = _llm_retry_limit() if retries is None else max(0, int(retries))
 
     async def _notify_wait(reason: str, seconds: float) -> None:
         if on_retry is not None:
@@ -685,7 +707,7 @@ async def _completion_with_retries(
             kind = classify_llm_error(exc)
             if kind == "quota_exhausted":
                 raise                     # 重试永远不会成功：直接让上层说清
-            if kind in {"rate_limit", "token_limit"}:
+            if kind in {"rate_limit", "token_limit", "transient"}:
                 # 失败响应上也可能带限流头（最权威），先学再决定等多久
                 _learn_from_headers(_headers_from_exception(exc), key=pace_key)
                 # TPM 只重试一次：token 窗口不是"等几秒"能恢复的，反复空等只会让用户干瞪眼
@@ -719,6 +741,7 @@ async def stream_turn(
     *,
     on_text: Callable[[str], Awaitable[None]] | None = None,
     on_retry: Callable[[int, float, str, str], Awaitable[None]] | None = None,
+    retries: int | None = None,
     timeout: int | None = None,
     temperature: float = 0.2,
 ) -> TurnResult:
@@ -765,14 +788,40 @@ async def stream_turn(
     # 端点身份（base_url + model）：学到的节奏按它持久化（**不含 api_key**）
     pace_key = f"{cfg.base_url or 'default'}|{cfg.model}"
     apply_pace_for_key(pace_key)
-    response = await _completion_with_retries(
-        kwargs, on_retry, pace_key=pace_key, tokens=estimate_tokens(messages, tools)
-    )
-    async for chunk in response:
-        new_text = acc.absorb(chunk)
-        if new_text and on_text is not None:
-            await on_text(new_text)
-    return acc.to_result(int((time.monotonic() - started) * 1000))
+    tokens = estimate_tokens(messages, tools)
+
+    # 流到一半断开也要能重来（用户实测：第 10 轮时 Connection error. 直接作废整轮）。
+    # 但只在「还没收到任何内容」时重试：已经吐给前端的文字收不回来，重来会让时间线上
+    # 出现两份重复的中间过程；那种情况如实失败，靠「失败也交付」保住已确认的结论。
+    mid_rounds = 0
+    while True:
+        try:
+            response = await _completion_with_retries(
+                kwargs, on_retry, pace_key=pace_key, tokens=tokens, retries=retries
+            )
+            async for chunk in response:
+                new_text = acc.absorb(chunk)
+                if new_text and on_text is not None:
+                    await on_text(new_text)
+        except Exception as exc:  # noqa: BLE001
+            limit = _llm_retry_limit() if retries is None else max(0, int(retries))
+            if mid_rounds >= limit or classify_llm_error(exc) != "transient" or acc.deltas_seen > 0:
+                raise
+            delay = _retry_delay(exc, mid_rounds, "transient", key=pace_key)
+            mid_rounds += 1
+            if on_retry is not None:
+                try:
+                    await on_retry(
+                        mid_rounds,
+                        delay,
+                        f"{str(exc)[:200]}（连接中断，本轮还没收到内容，重试中）",
+                        "transient",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            await asyncio.sleep(delay)
+            continue
+        return acc.to_result(int((time.monotonic() - started) * 1000))
 
 
 # ---------------------------------------------------------------------------
@@ -831,7 +880,7 @@ async def smoke_test(cfg: ProviderConfig, timeout: int = 90) -> SmokeResult:
 
     # ---- 第 1 轮 ----
     try:
-        first = await stream_turn(cfg, messages, [PING_TOOL], timeout=timeout)
+        first = await stream_turn(cfg, messages, [PING_TOOL], timeout=timeout, retries=1)
     except Exception as exc:  # noqa: BLE001 —— 这里就是要兜住所有异常并翻译成人话
         return SmokeResult(
             ok=False,
@@ -898,7 +947,7 @@ async def smoke_test(cfg: ProviderConfig, timeout: int = 90) -> SmokeResult:
         }
     )
     try:
-        second = await stream_turn(cfg, messages, [PING_TOOL], timeout=timeout)
+        second = await stream_turn(cfg, messages, [PING_TOOL], timeout=timeout, retries=1)
     except Exception as exc:  # noqa: BLE001
         return SmokeResult(
             ok=False,
@@ -1015,9 +1064,39 @@ def _diagnose_exception(exc: Exception) -> str:
     # 而"连了但对方不说话"和"根本没连上"对用户的含义不一样。
     if "timed out" in lowered or "timeout" in lowered or isinstance(exc, asyncio.TimeoutError):
         return "超时：端点在该时间内没有任何响应。"
+    kind = classify_llm_error(exc)
+
+    # 顺序很重要：transient 必须排在 connection 之前。
+    # 实测踩过：MidStreamFallbackError / InternalServerError 的消息里也带 "connection"，
+    # 结果被下面那条"连不上 base_url"抢走，用户看到的解释与处置建议都是错的。
+    if kind == "transient":
+        if any(
+            marker in lowered
+            for marker in (
+                "connection refused", "name or service not known", "nodename nor servname",
+                "getaddrinfo", "拒绝连接", "名称解析",
+            )
+        ):
+            # 这一类更像"地址/端口不对，或服务没在跑"，而不是网络抖动——建议完全不同
+            return (
+                "连不上 base_url：地址或端口不对，或者那个服务根本没在跑。"
+                "检查 base_url 是否要带 /v1、端口是否正确、服务是否已启动。"
+                f"原始信息：{_clean(text)[:160]}"
+            )
+        if "midstream" in name.lower() or "stream" in name.lower():
+            return (
+                "流到一半连接断了（不是限流/额度问题）：已经收到的内容**不能当作结论**，"
+                "所以这一轮如实失败——但已定位并核验过的结论照常交付，重跑一次通常会跑完。"
+                f"原始信息：{_clean(text)[:160]}"
+            )
+        return (
+            "连接中断或网关 5xx（不是限流，也不是额度问题）：常见原因是网络抖动、代理不稳定，"
+            "或中转站自己重启/过载。**已经自动重试过几次**；仍然失败就重跑一次，"
+            "反复出现就检查本机代理或换端点。已确认的结论不会丢（失败也会交付）。"
+            f"原始信息：{_clean(text)[:160]}"
+        )
     if "connection" in name.lower() or "connect" in lowered:
         return "连不上 base_url：检查地址、网络，以及该服务是否允许从这里访问。"
-    kind = classify_llm_error(exc)
     if kind == "quota_exhausted":
         return (
             "账号额度/余额用尽（不是限流，**重试无用**）：去充值、换 key 或换端点。"

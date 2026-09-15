@@ -20,6 +20,8 @@
 | `headers-only-limit` | 成功响应只带 `x-ratelimit-limit-requests`，**错误话术里什么都不说** → 验证「权威信号优先」（不靠解析中文话术也能降速） |
 | `quota-exhausted` | 一直返回 429 + `quota`/余额话术 → 验证「不重试、直接说清重试无用」 |
 | `tpm-limited` | 一直返回 429 + `tokens per minute` 话术 → 验证「按 token 而不是按请求节流」 |
+| `flaky-once` | 第一次请求返回 500 + `Connection error.` → 验证「瞬时网络故障会自动重试并跑完」 |
+| `flaky-midstream` | 吐了 2 个 chunk 之后直接掐断流 → 验证「中途断线不会静默成功」 |
 
 注意：定位阶段**只提交用户在提示里勾选的那些创新点**。如果不管用户勾了什么、按固定剧本
 提交全部三条，用户只勾一条时就会被后端一直拒绝，于是原地空转到轮数上限。
@@ -668,6 +670,21 @@ async def chat_completions(request: Request):
             ),
         )
 
+    # 瞬时故障：连接错误/网关 5xx —— 后端应当自动重试（用户实测第 10 轮被这个打断）
+    if "flaky-once" in model:
+        _RATE_LIMIT_HITS[model] = _RATE_LIMIT_HITS.get(model, 0) + 1
+        if _RATE_LIMIT_HITS[model] == 1:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": {
+                        "message": "OpenAIException - Connection error.",
+                        "type": "internal_server_error",
+                        "code": "internal_server_error",
+                    }
+                },
+            )
+
     # 额度用尽：长得像限流（用 429），但重试永远不会成功 → 后端必须**不重试**并说清
     if "quota-exhausted" in model:
         return JSONResponse(
@@ -768,10 +785,17 @@ RATE_LIMIT_HEADERS = {
 
 
 def _sse(chunks: list[str], model: str = "") -> StreamingResponse:
-    """把拼好的 chunk 序列包成 SSE 流式响应。"""
+    """把拼好的 chunk 序列包成 SSE 流式响应。
+
+    flaky-midstream：吐两个 chunk 之后直接掐断（模拟"跑到一半连接断了"）——
+    客户端应当报错，而不是把半截响应当成完整回答。
+    """
     async def gen() -> AsyncIterator[str]:
-        for piece in [*chunks, "data: [DONE]\n\n"]:
+        for index, piece in enumerate([*chunks, "data: [DONE]\n\n"]):
             await asyncio.sleep(CHUNK_DELAY)
+            if "flaky-midstream" in model and index >= 2:
+                # 吐了两个 chunk 之后掐断：客户端必须报错，不能把半截响应当完整回答
+                raise RuntimeError("Connection error.")
             yield piece
 
     # 默认**不带**限额头（否则每个验收用例都会顺带"学会"限额，断言就分不清是谁教的）。

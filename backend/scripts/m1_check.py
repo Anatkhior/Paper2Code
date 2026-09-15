@@ -607,8 +607,8 @@ async def section_g(check: Checker, client: httpx.AsyncClient) -> None:
         and providers_module.classify_llm_error(_FakeError("payment required", 402)) == "quota_exhausted"
         and providers_module.classify_llm_error(_FakeError("200000 tokens per minute", 429)) == "token_limit"
         and providers_module.classify_llm_error(_FakeError("1分钟内最多请求10次", 429)) == "rate_limit"
-        and providers_module.classify_llm_error(_FakeError("connection reset")) == "other",
-        "错误分类：额度用尽（含 402）/ TPM / 普通限流 / 其他 各归各类",
+        and providers_module.classify_llm_error(_FakeError("unexpected response shape")) == "other",
+        "错误分类：额度用尽（含 402）/ TPM / 普通限流 / 其他 各归各类（transient 由 H 段钉）",
     )
     check(
         providers_module._interval_from_limit_header("10, 10;w=60") == 6.0
@@ -635,6 +635,89 @@ async def section_g(check: Checker, client: httpx.AsyncClient) -> None:
         check(True, "学到的节奏尚未落盘（本轮没有需要持久化的端点）")
 
 
+async def section_h(check: Checker, client: httpx.AsyncClient) -> None:
+    """瞬时故障（连接错误 / 网关 5xx）：自动重试；中途断线则如实失败并保留成果。
+
+    起因（2026-09-15 用户实测）：跑到第 10 轮（16 次工具调用 / 5 条创新点）时
+    `InternalServerError: Connection error.` → 旧代码归到「其他」，**不重试**，整轮作废。
+    网络抖动本来是最该重试的一类错误。
+    """
+    from app import providers as providers_module
+
+    check.section("H. 瞬时故障（连接错误 / 网关 5xx）：重试 + 中途断线不静默成功")
+
+    # ---- ① 第一次就 500 "Connection error."：应当自动重试并跑完 ----
+    run_id = await upload_paper(client, check, "flaky-once")
+    events = await run_recon(client, check, run_id, "flaky-once")
+    types = [event["type"] for event in events]
+    retries = events_of(events, "llm_retry")
+    check(bool(retries), f"瞬时故障会重试并留痕（{types[:6]}…）")
+    if retries:
+        payload = retries[0]["data"]
+        check(
+            payload.get("reason") == "transient",
+            f"事件里标明是瞬时故障而不是限流（reason={payload.get('reason')}）",
+        )
+        check(
+            "Connection" in str(payload.get("detail", "")) or "连接" in str(payload.get("detail", "")),
+            f"细节里带上原始错误，便于排障：{str(payload.get('detail'))[:60]}…",
+        )
+    check("plan_ready" in types, "重试之后侦察照样跑完（不会因为一次网络抖动白跑）")
+    end = events_of(events, "run_end")
+    check(
+        bool(end) and end[0]["data"]["status"] == "ok",
+        f"这一轮状态是 ok（实际 {end[0]['data']['status'] if end else '无 run_end'}）",
+    )
+
+    # ---- ② 流到一半掐断：必须失败，不能把半截响应当成完整回答 ----
+    mid_run = await upload_paper(client, check, "flaky-midstream")
+    mid_events = await run_recon(client, check, mid_run, "flaky-midstream")
+    mid_types = [event["type"] for event in mid_events]
+    mid_end = events_of(mid_events, "run_end")
+    check(bool(mid_end), "中途断线也会正常收尾（不会挂住）")
+    if mid_end:
+        status = mid_end[0]["data"]["status"]
+        reason = str(mid_end[0]["data"].get("stopped_reason", ""))
+        check(status == "failed", f"中途断线如实失败（status={status}）")
+        check(
+            "连接" in reason or "Connection" in reason or "中途" in reason,
+            f"失败原因说清是连接问题：{reason[:70]}…",
+        )
+        check(
+            "重跑一次" in reason or "照常交付" in reason,
+            "并说清处置办法（重跑 / 已确认的部分照常交付）",
+        )
+        check("plan_ready" not in mid_types, "没有把半截响应当成完整回答继续往下走")
+        check(
+            mid_end[0]["data"].get("partial") is True,
+            "标 partial：已确认的成果照常交付（半截内容不会被当成结论）",
+        )
+
+    # ---- ③ 纯函数层：分类与退避 ----
+    class _FakeError(Exception):
+        def __init__(self, message: str, status: int | None = None) -> None:
+            super().__init__(message)
+            self.status_code = status
+
+    check(
+        providers_module.classify_llm_error(_FakeError("OpenAIException - Connection error.", 500)) == "transient"
+        and providers_module.classify_llm_error(_FakeError("Connection reset by peer")) == "transient"
+        and providers_module.classify_llm_error(_FakeError("502 Bad Gateway", 502)) == "transient"
+        and providers_module.classify_llm_error(_FakeError("Server disconnected without sending a response")) == "transient",
+        "连接错误 / 断连 / 5xx 都归入 transient（这类最该重试）",
+    )
+    check(
+        providers_module.classify_llm_error(_FakeError("Request timed out.")) == "other",
+        "超时**刻意不算** transient：那是「端点太慢」，重试只会在同一时限上再等一遍",
+    )
+    delays = [providers_module._retry_delay(_FakeError("Connection error.", 500), i, "transient") for i in range(4)]
+    check(
+        delays == [5.0, 10.0, 20.0, 40.0],
+        f"瞬时故障的退避比限流更快起跳（{delays}）——抖动通常几秒内恢复",
+    )
+    providers_module.reset_llm_pacing()
+
+
 async def main() -> int:
     check = Checker("M1 验收")
     mock = start_service("devtools.mock_provider:app", MOCK_PORT)
@@ -652,6 +735,7 @@ async def main() -> int:
             await section_e(check, client)
             await section_g(check, client)
             await section_f(check, client)
+            await section_h(check, client)
 
         await section_d(check)
         return check.finish()
