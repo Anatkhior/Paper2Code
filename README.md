@@ -3,7 +3,7 @@
 上传一篇论文 PDF + 粘贴一个 GitHub 仓库链接，系统用 Agent 自主探索，定位论文核心创新点对应的代码实现，
 并给出**可核验**的对照解读。
 
-> 当前状态：**v0（M0–M4）+ v1 三阶段全部完成并验收** —— 36+162+174+39+48+43+42 = **544 项断言**全部离线可复现：
+> 当前状态：**v0（M0–M4）+ v1 三阶段全部完成并验收** —— 36+162+174+44+48+44+42 = **550 项断言**全部离线可复现：
 > `cd backend && ./scripts/run_all_checks.sh`（含前端构建与生产页面渲染、gold set 评估）。
 >
 > v1 已做：**双栏对照阅读器**（左栏可切「PDF 原版（真实排版，滚动看全文）」与「原文文本（可划选）」，
@@ -110,9 +110,9 @@ uv pip install --python .venv/bin/python -r requirements.txt
 .venv/bin/python -m scripts.m0_check   # M0 回归（36 项）
 .venv/bin/python -m scripts.m1_check   # M1 阶段 A（162 项）
 .venv/bin/python -m scripts.m2_check   # M2 阶段 B（174 项）
-.venv/bin/python -m scripts.m3_check   # M3 对照界面 + 前端构建渲染（39 项；跑前先停掉 next dev）
+.venv/bin/python -m scripts.m3_check   # M3 对照界面 + 前端构建渲染（44 项；跑前先停掉 next dev）
 .venv/bin/python -m scripts.m4_check   # M4 gold set + 指标自检 + README 一致性（48 项）
-.venv/bin/python -m scripts.m6_check   # v1② 划选→定位目标（43 项；跑前先停掉 next dev）
+.venv/bin/python -m scripts.m6_check   # v1② 划选→定位目标（44 项；跑前先停掉 next dev）
 .venv/bin/python -m scripts.m7_check   # v1③ 追问对话（42 项；跑前先停掉 next dev）
 
 # 或者一键全跑（推荐）

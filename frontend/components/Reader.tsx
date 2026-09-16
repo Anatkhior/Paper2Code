@@ -66,9 +66,26 @@ function locateQuote(text: string, quote?: string) {
  * 1. **两边都要尽可能大**：占满可用的高度，各自独立滚动（滚代码不会把原文滚走）。
  * 2. 显示的内容与**被核验的内容是同一份**：代码由后端按 commit 从 git 对象里读出来。
  */
+/**
+ * 把引文压成适合塞进浏览器 PDF 阅读器 `#search=` 的短词。
+ * Chromium / Firefox 的内置阅读器都支持 `#search=`（会在页面里高亮命中），
+ * 但太长或带换行的串会匹配不上，所以只取前几个词。
+ */
+function pdfSearchTerm(quote?: string) {
+  if (!quote) return "";
+  const cleaned = quote
+    .replace(/[\u201c\u201d"'`]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return "";
+  return cleaned.split(" ").slice(0, 8).join(" ").slice(0, 60);
+}
+
+
 export default function Reader({ left, right, pdfUrl, onGoToPage, onSelectTarget }: Props) {
   const [paperMode, setPaperMode] = useState<PaperMode>("pdf");
   const focusRef = useRef<HTMLDivElement>(null);
+  const paperMarkRef = useRef<HTMLElement>(null);
   const paperBodyRef = useRef<HTMLDivElement>(null);
   const [selection, setSelection] = useState<{ text: string; x: number; y: number } | null>(null);
   const quoteParts = useMemo(
@@ -79,6 +96,20 @@ export default function Reader({ left, right, pdfUrl, onGoToPage, onSelectTarget
   useEffect(() => {
     focusRef.current?.scrollIntoView({ block: "center" });
   }, [right?.path, right?.start, right?.end, right?.lines]);
+
+  /**
+   * 左栏的高亮自动进视野。
+   *
+   * 用户不用自己滚：点了「查看原文」→ 页面滚到阅读器 → 这一页的文本可能刚好加载完，
+   * 高亮又落在滚动区外面。这里在引文/该页文本/视图模式变化时把 <mark> 挪到可视区中间。
+   */
+  useEffect(() => {
+    if (!quoteParts) return;
+    const timer = window.setTimeout(() => {
+      paperMarkRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 60);
+    return () => window.clearTimeout(timer);
+  }, [left?.quote, left?.text, left?.page, paperMode, quoteParts]);
 
   /**
    * 划选一段原文 → 弹出「以此为目标」。
@@ -104,7 +135,12 @@ export default function Reader({ left, right, pdfUrl, onGoToPage, onSelectTarget
     });
   }, []);
 
-  const pdfSrc = pdfUrl ? `${pdfUrl}#page=${left?.page ?? 1}&view=FitH&toolbar=1` : null;
+  // PDF 视图的高亮：浏览器内置阅读器不允许外部脚本操作 DOM，但支持用 `#search=` 触发
+  // 它自己的查找并高亮命中——这是"在 PDF 原版里也高亮同一段"的现实做法。
+  const pdfSearch = useMemo(() => pdfSearchTerm(left?.quote), [left?.quote]);
+  const pdfSrc = pdfUrl
+    ? `${pdfUrl}#page=${left?.page ?? 1}&view=FitH&toolbar=1${pdfSearch ? `&search=${encodeURIComponent(pdfSearch)}` : ""}`
+    : null;
 
   return (
     <div className="relative">
@@ -184,11 +220,18 @@ export default function Reader({ left, right, pdfUrl, onGoToPage, onSelectTarget
         </header>
 
         {paperMode === "pdf" && (
-          <div className="min-h-0 flex-1 bg-neutral-100 dark:bg-neutral-900">
+          <div className="flex min-h-0 flex-1 flex-col bg-neutral-100 dark:bg-neutral-900">
+            {pdfSearch && (
+              <p className="border-b border-neutral-200 bg-white px-3 py-1 text-[11px] text-neutral-500 dark:border-neutral-800 dark:bg-neutral-950">
+                PDF 视图已跳到第 {left?.page ?? 1} 页，并用浏览器**内置查找**高亮这段引文
+                （浏览器支持范围内；换成「原文文本」能看到精确到字符的高亮）
+              </p>
+            )}
             {pdfSrc ? (
               // key 里带上页码：只改 URL 的 #fragment 浏览器不会重新加载，换 key 才会真正跳页
               <iframe
-                key={`pdf-${left?.page ?? 1}`}
+                // key 里再带上引文：同一页换一段引文时也要重新加载，`#search=` 才会重新执行
+                key={`pdf-${left?.page ?? 1}-${pdfSearch}`}
                 src={pdfSrc}
                 title="论文 PDF"
                 className="h-full w-full border-0"
@@ -216,7 +259,10 @@ export default function Reader({ left, right, pdfUrl, onGoToPage, onSelectTarget
               {quoteParts ? (
                 <>
                   {quoteParts.before}
-                  <mark className="bg-amber-200 px-0.5 dark:bg-amber-800 dark:text-amber-50">
+                  <mark
+                    ref={paperMarkRef}
+                    className="scroll-mt-24 bg-amber-200 px-0.5 dark:bg-amber-800 dark:text-amber-50"
+                  >
                     {quoteParts.match}
                   </mark>
                   {quoteParts.after}

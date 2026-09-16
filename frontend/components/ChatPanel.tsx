@@ -79,7 +79,7 @@ export default function ChatPanel({
   return (
     <section className="rounded-lg border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950">
       <header className="flex flex-wrap items-center gap-2 border-b border-neutral-200 px-3 py-2 dark:border-neutral-800">
-        <h2 className="text-sm font-semibold">8. 追问</h2>
+        <h2 className="text-sm font-semibold">7. 追问</h2>
         <span className="text-[11px] text-neutral-500">
           它可以自己去翻论文和代码（每条消息最多 8 次工具调用），回答里的代码位置会被机械核对
         </span>

@@ -596,7 +596,6 @@ export default function Home() {
               selected={selected}
               onToggle={toggle}
               onSelectAll={toggleAll}
-              onLocate={handleLocate}
               onRename={renameTarget}
               onDelete={removeTarget}
             />
@@ -664,11 +663,24 @@ export default function Home() {
           />
         </section>
 
+        <div ref={chatRef} className="scroll-mt-4">
+          <ChatPanel
+            turns={chatTurns}
+            streaming={chatStreaming}
+            busy={chatBusy}
+            context={chatContext}
+            onClearContext={() => setChatContext(null)}
+            onSend={sendChat}
+            disabled={!runId}
+            onOpenCitation={(path, start, end) => openCode(path, start, end, "来自追问对话")}
+          />
+        </div>
+
         <section>
           <h2 className="mb-2 text-sm font-semibold">
-            7. 逐条结论
+            8. 逐条结论
             <span className="ml-2 text-[11px] font-normal text-neutral-500">
-              点任意引用，上方阅读器会跳到对应位置
+              点任意引用，上方的对照阅读器会跳到对应位置（追问也在这里就能用）
             </span>
           </h2>
           <ComparePanel
@@ -683,18 +695,6 @@ export default function Home() {
           />
         </section>
 
-        <div ref={chatRef} className="scroll-mt-4">
-          <ChatPanel
-            turns={chatTurns}
-            streaming={chatStreaming}
-            busy={chatBusy}
-            context={chatContext}
-            onClearContext={() => setChatContext(null)}
-            onSend={sendChat}
-            disabled={!runId}
-            onOpenCitation={(path, start, end) => openCode(path, start, end, "来自追问对话")}
-          />
-        </div>
       </div>
     </main>
   );

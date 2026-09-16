@@ -250,7 +250,7 @@ async def section_f(check: Checker) -> None:
         async with httpx.AsyncClient() as plain:
             html = (await plain.get(f"http://127.0.0.1:{FRONTEND_PORT}/", timeout=30)).text
         for marker, description in {
-            "8. 追问": "追问面板",
+            "7. 追问": "追问面板（现在位于对照阅读器与逐条结论之间）",
             "它可以自己去翻论文和代码": "能力说明（每条消息的预算）",
             "还没问过": "空状态引导",
             "就这条追问": "从结论卡片发起追问",

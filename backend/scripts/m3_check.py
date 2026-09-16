@@ -241,7 +241,8 @@ async def section_b(check: Checker) -> None:
             "4. 代码仓库": "阶段 B 输入区",
             "5. Agent 行动轨迹": "时间线",
             "6. 对照阅读器": "双栏阅读器",
-            "7. 逐条结论": "逐条结论区",
+            "7. 追问": "追问面板（放在阅读器与结论之间，方便边看边问）",
+            "8. 逐条结论": "逐条结论区",
             "论文原文": "阅读器左栏（论文原文）",
             "PDF 原版": "PDF 视图开关",
             "原文文本": "文本视图开关（可划选）",
@@ -252,6 +253,29 @@ async def section_b(check: Checker) -> None:
         for marker, description in markers.items():
             check(marker in html, f"页面渲染出「{description}」（{marker}）")
         check("PaperLens" in html, "页面标题正常")
+
+        # 版式回归（2026-09-16 用户反馈）：
+        # ① 「核心创新点」下面那个定位按钮与第 4 节的重复 → 已移除，只保留一个动作入口
+        check(
+            "开始定位选中项" not in html,
+            "创新点清单区不再有第二个「开始定位」按钮（与第 4 节重复）",
+        )
+        check(
+            "开始定位选中的" in html,
+            "第 4 节仍然保留唯一的定位入口（文案带选中条数）",
+        )
+        # ② 追问面板要夹在「对照阅读器」与「逐条结论」之间（用户要求的阅读/交互顺序）
+        order = [html.find(name) for name in ("6. 对照阅读器", "7. 追问", "8. 逐条结论")]
+        check(
+            all(pos >= 0 for pos in order) and order == sorted(order),
+            f"页面顺序：对照阅读器 → 追问 → 逐条结论（位置 {order}）",
+        )
+        # ③ 结论区的引导文案要跟新顺序一致（上面隔着追问面板）
+        #    （阅读器"PDF 内置查找高亮 + 高亮自动进视野"是运行期行为，由 m6 从打包产物里断言）
+        check(
+            "上方的对照阅读器会跳到对应位置" in html,
+            "逐条结论区的引导文案与新版式一致（点引用 → 上方阅读器跳过去）",
+        )
     finally:
         server.terminate()
         try:

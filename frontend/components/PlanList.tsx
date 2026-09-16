@@ -9,7 +9,6 @@ interface Props {
   selected: Set<string>;
   onToggle: (id: string) => void;
   onSelectAll: () => void;
-  onLocate: () => void;
   onRename?: (id: string, name: string) => void;
   onDelete?: (id: string) => void;
 }
@@ -25,7 +24,6 @@ export default function PlanList({
   selected,
   onToggle,
   onSelectAll,
-  onLocate,
   onRename,
   onDelete,
 }: Props) {
@@ -179,14 +177,8 @@ export default function PlanList({
         );
       })}
 
-      <button
-        type="button"
-        onClick={onLocate}
-        disabled={selected.size === 0}
-        className="w-full rounded bg-neutral-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-40 dark:bg-neutral-100 dark:text-neutral-900"
-      >
-        开始定位选中项（阶段 B）
-      </button>
+      {/* 这里原本还有一个「开始定位选中项」按钮，与第 4 节「代码仓库」里的按钮重复 →
+          已移除（定位需要先填仓库地址，动作应该只出现在填地址的那一节旁边）。 */}
       <p className="text-[11px] text-neutral-500">
         阶段 B：对每条选中的创新点，克隆仓库并让 Agent 自主探索，产出带 commit/文件/行号/片段哈希的代码引用，
         再由后端从 git 对象里重放核验。找得到就给对照解读，找不到就明确写「未找到」。

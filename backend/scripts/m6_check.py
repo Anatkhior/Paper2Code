@@ -310,6 +310,17 @@ async def section_c(check: Checker) -> None:
             for chunk in (FRONTEND / ".next" / "static" / "chunks").rglob("*.js")
         )
         check(notes_hit, "仓库就绪行显示「另有 N 个未下载」（源码视图克隆跳过了什么，用户看得见）")
+
+        # 阅读器：① PDF 视图用浏览器内置查找高亮同一段；② 高亮自动进视野（用户不用自己翻）
+        reader_hit = any(
+            "内置查找" in chunk.read_text(encoding="utf-8", errors="ignore")
+            and "scrollIntoView" in chunk.read_text(encoding="utf-8", errors="ignore")
+            for chunk in (FRONTEND / ".next" / "static" / "chunks").rglob("*.js")
+        )
+        check(
+            reader_hit,
+            "对照阅读器：PDF 内置查找高亮 + 高亮自动进视野 都进了打包产物",
+        )
     finally:
         server.terminate()
         try:
