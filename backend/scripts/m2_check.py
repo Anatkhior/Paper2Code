@@ -871,7 +871,7 @@ async def locate(
     response = await client.post(f"/api/runs/{run_id}/locate", json=payload)
     check(response.status_code == 200, f"阶段 B 已启动（HTTP {response.status_code} {response.text[:120]}）")
     events, first_at, end_at = await collect_sse(
-        client, f"/api/runs/{run_id}/events?from_id={baseline}", since_id=baseline
+        client, f"/api/runs/{run_id}/events?from_id={baseline}", since_id=baseline, timeout_s=240
     )
     print(f"   事件序列：{' → '.join(e['type'] for e in events)}", flush=True)
     return events
@@ -1113,6 +1113,56 @@ async def section_i(check: Checker, client: httpx.AsyncClient) -> None:
     finally:
         settings.llm_max_retries = saved_retries
         providers_module.reset_llm_pacing()
+async def section_j(check: Checker, client: httpx.AsyncClient) -> None:
+    """预算必须对**模型本人**可见：否则它会一直探索到撞墙，一条结论都不交。
+
+    起因（2026-09-15 用户实测）：那一轮 23 轮 / **40 次工具调用全部花在探索上**，
+    核验 0/0、清单里 3 条全是「还有未提交的创新点」。模型全程不知道自己在烧最后一次机会——
+    "超限不是崩溃、而是用已确认的部分交付"这条原则，前提是模型得知道快超限了。
+    """
+    check.section("J. 预算对模型可见（否则 40 次调用 0 条结论）")
+
+    run_id = await prepare_run(client, check, "mock-model")
+    events = await locate(client, check, run_id, "budget-aware")  # ~30 次 mock 调用，通常十几秒
+    types = [event["type"] for event in events]
+
+    warnings = [
+        event for event in events_of(events, "budget_warning")
+        if "预算提醒" in str(event["data"].get("reason", ""))
+    ]
+    check(bool(warnings), f"预算提醒会发给模型（并在时间线上可见）：{types[:8]}…")
+    if warnings:
+        reason = str(warnings[0]["data"]["reason"])
+        check(
+            "record_finding" in reason,
+            f"提醒里给出明确动作（提交已确认的结论）：{reason[:70]}…",
+        )
+        check(
+            "次工具调用" in reason,
+            "提醒里带上用量，模型/用户都知道还剩多少",
+        )
+    check(
+        "finding" in types,
+        "看到提醒后模型转向提交结论（不再一直读文件）",
+    )
+    end = events_of(events, "run_end")
+    check(bool(end), "以 run_end 收尾")
+    if end:
+        usage = end[0]["data"].get("usage", {})
+        used = int(usage.get("tool_calls", 0))
+        limit = int(usage.get("limits", {}).get("max_tool_calls", 0))
+        check(
+            used < limit,
+            f"没有撞到上限就有产出（用了 {used}/{limit} 次调用）——对比用户那次 40/40、0 条结论",
+        )
+    artifact = (await client.get(f"/api/runs/{run_id}")).json().get("artifact") or {}
+    findings = artifact.get("innovations") or []
+    check(
+        bool(findings),
+        f"交付里真的有结论（{len(findings)} 条），不是「0/0 通过核验」的空壳",
+    )
+
+
 async def section_d(check: Checker, prepared_run_id: str) -> None:
     check.section("D. 失败路径")
     from app.config import settings
@@ -1192,6 +1242,9 @@ async def main() -> int:
             await section_e(check, client)
             await section_f(check, client)
             await section_g(check, client)
+            # 顺序有讲究：J（预算可见）放在 I（限流）之前——I 会让后端进程学到 6s/次的节奏，
+            # 后面的用例会被跟着限速（实测 J 的 ~30 次调用因此超过 120s 读流超时）。
+            await section_j(check, client)
             await section_i(check, client)
 
         await section_d(check, prepared_run_id)

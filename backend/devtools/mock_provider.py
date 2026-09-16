@@ -22,6 +22,7 @@
 | `tpm-limited` | 一直返回 429 + `tokens per minute` 话术 → 验证「按 token 而不是按请求节流」 |
 | `flaky-once` | 第一次请求返回 500 + `Connection error.` → 验证「瞬时网络故障会自动重试并跑完」 |
 | `flaky-midstream` | 吐了 2 个 chunk 之后直接掐断流 → 验证「中途断线不会静默成功」 |
+| `budget-aware` | 一直读文件**从不提交**，直到在对话里看到「预算提醒」才 record_finding → 验证「预算对模型可见」这条链路真的生效（否则那一轮就是 40 次调用 0 条结论） |
 
 注意：定位阶段**只提交用户在提示里勾选的那些创新点**。如果不管用户勾了什么、按固定剧本
 提交全部三条，用户只勾一条时就会被后端一直拒绝，于是原地空转到轮数上限。
@@ -419,6 +420,18 @@ def locate_action(messages: list[dict[str, Any]], model: str) -> tuple[str, dict
     if "stuck" in model:
         # 一直卡在同一个错误上：验证后端会提前停止而不是空转到上限
         return "read_file", {"path": "ghost_file_that_does_not_exist.py"}, "call_stuck"
+
+    if "budget-aware" in model and not any(
+        "预算提醒" in str(m.get("content") or "") for m in messages
+    ):
+        # 用户实测的那种失败模式：一直读文件、**从不提交**，直到把预算耗光。
+        # 只有看到「预算提醒」才转向 record_finding —— 用来验证"预算对模型可见"这条链路。
+        reads = len(_tool_messages(messages, "read_file"))
+        return (
+            "read_file",
+            {"path": "README.md", "start_line": 1 + reads * 5, "end_line": 5 + reads * 5},
+            f"call_explore_{reads}",
+        )
 
     if not any(m.get("role") == "tool" for m in messages):
         return "repo_tree", {"path": "", "depth": 2}, "call_locate_1"

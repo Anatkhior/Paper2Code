@@ -82,6 +82,53 @@ async def run_agent(
     paced_waits: list[float] = []
     budget_warned_pacing = False
 
+    reminded: set[str] = set()
+
+    async def _maybe_remind_budget() -> None:
+        """把"还剩多少预算"告诉模型本人。
+
+        为什么必须做（2026-09-15 用户实测）：那一轮 23 轮 / 40 次工具调用**全部花在探索上**，
+        一条结论都没提交（核验 0/0、清单里 3 条全未提交），而模型全程不知道自己在烧最后一次机会。
+        "超限不是崩溃、而是用已确认的部分交付"这条原则，**前提是模型得知道快超限了**。
+        提醒用 user 角色（而不是中途插 system）：兼容那些不接受对话中途 system 消息的网关。
+        """
+        remaining_calls = budget.max_tool_calls - budget.tool_calls
+        remaining_wall = budget.wall_clock_seconds - budget.elapsed
+        notice: str | None = None
+        if remaining_calls <= 2 and "calls-critical" not in reminded:
+            reminded.add("calls-critical")
+            notice = (
+                f"[预算提醒] 只剩 {max(0, remaining_calls)} 次工具调用。**立刻**用 record_finding "
+                "提交你已经确认的结论（找不到的就如实写 not_found），然后调用 finish。不要再读新文件。"
+            )
+        elif remaining_calls <= max(3, int(budget.max_tool_calls * 0.15)) and "calls-low" not in reminded:
+            reminded.add("calls-low")
+            notice = (
+                f"[预算提醒] 已用 {budget.tool_calls}/{budget.max_tool_calls} 次工具调用，"
+                "只剩很少了。请优先把已经找到证据的创新点用 record_finding 提交，"
+                "没找到的直接标 not_found，不要再开新的探索方向。"
+            )
+        elif budget.tool_calls >= int(budget.max_tool_calls * 0.6) and "calls-half" not in reminded:
+            reminded.add("calls-half")
+            notice = (
+                f"[预算提醒] 已用 {budget.tool_calls}/{budget.max_tool_calls} 次工具调用。"
+                "记住：**边搜边交**——证据够了就 record_finding，不要攒到最后（没提交的等于没做）。"
+            )
+        elif remaining_wall <= max(20.0, budget.wall_clock_seconds * 0.15) and "wall-low" not in reminded:
+            reminded.add("wall-low")
+            notice = (
+                f"[预算提醒] 本轮只剩约 {int(remaining_wall)} 秒。请立刻提交已确认的结论"
+                "（或如实报 not_found）并 finish。"
+            )
+        if notice is None:
+            return
+        messages.append({"role": "user", "content": notice})
+        await bus.emit(
+            "budget_warning",
+            reason=f"{notice}（这轮已用 {budget.tool_calls}/{budget.max_tool_calls} 次工具调用）",
+            used=budget.snapshot(),
+        )
+
     async def _warn_if_budget_infeasible() -> None:
         """按当前节奏跑不完预算就提前说，别让用户在"预算用尽"上再撞一次墙。
 
@@ -127,6 +174,7 @@ async def run_agent(
 
             turn += 1
             await bus.emit("step_start", turn=turn)
+            await _maybe_remind_budget()
 
             budget.input_tokens += estimate_tokens(messages, tool_schemas)
 

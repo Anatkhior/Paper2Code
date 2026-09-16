@@ -3,7 +3,7 @@
 上传一篇论文 PDF + 粘贴一个 GitHub 仓库链接，系统用 Agent 自主探索，定位论文核心创新点对应的代码实现，
 并给出**可核验**的对照解读。
 
-> 当前状态：**v0（M0–M4）+ v1 三阶段全部完成并验收** —— 36+162+166+39+48+43+42 = **536 项断言**全部离线可复现：
+> 当前状态：**v0（M0–M4）+ v1 三阶段全部完成并验收** —— 36+162+174+39+48+43+42 = **544 项断言**全部离线可复现：
 > `cd backend && ./scripts/run_all_checks.sh`（含前端构建与生产页面渲染、gold set 评估）。
 >
 > v1 已做：**双栏对照阅读器**（左栏可切「PDF 原版（真实排版，滚动看全文）」与「原文文本（可划选）」，
@@ -109,7 +109,7 @@ uv pip install --python .venv/bin/python -r requirements.txt
 # 离线验收：不需要任何真实 API key，会自己拉起 mock provider 跑完整链路
 .venv/bin/python -m scripts.m0_check   # M0 回归（36 项）
 .venv/bin/python -m scripts.m1_check   # M1 阶段 A（162 项）
-.venv/bin/python -m scripts.m2_check   # M2 阶段 B（166 项）
+.venv/bin/python -m scripts.m2_check   # M2 阶段 B（174 项）
 .venv/bin/python -m scripts.m3_check   # M3 对照界面 + 前端构建渲染（39 项；跑前先停掉 next dev）
 .venv/bin/python -m scripts.m4_check   # M4 gold set + 指标自检 + README 一致性（48 项）
 .venv/bin/python -m scripts.m6_check   # v1② 划选→定位目标（43 项；跑前先停掉 next dev）
@@ -227,6 +227,7 @@ curl -s http://127.0.0.1:8000/api/provider/smoke-test \
 | 公网多租户部署 | 设 `PAPERLENS_REPO_NETWORK_MODE=hosted`（严格判定 + 公网 DoH 交叉核验），并**另外做网络层隔离**：进程内的 DNS 检查不是安全边界 |
 | 仓库里有大体积演示视频/数据集，不想全下载 | 默认就只取**源码视图**（部分克隆 + 稀疏检出）：实测某个含 83MB 演示视频的仓库从 237MB 降到 2.3MB。想调整规则用 `PAPERLENS_REPO_SPARSE_EXCLUDE=!*.bin,!/docs/assets`；想彻底关掉用 `PAPERLENS_REPO_SPARSE=false` |
 | 提示"另有 N 个较大的二进制文件被下载了但工具不会读" | 照提示里给的 `PAPERLENS_REPO_SPARSE_EXCLUDE=!*.xxx` 加上那条规则即可（冷门二进制格式没法预判，所以系统会点名） |
+| 结束原因是「工具调用次数达到上限 40」而**一条结论都没提交** | 以前模型不知道自己在烧最后一次机会（实测有一轮 40 次调用、0 条结论）。现在**边搜边交**：提示词要求证据够了就提交，并在用到 60% / 85% / 墙钟告急时注入「[预算提醒] 已用 24/40…立刻提交已确认的结论」，时间线上同样可见。想直接放宽：`PAPERLENS_MAX_TOOL_CALLS=80`（配 `PAPERLENS_WALL_CLOCK_SECONDS`）——但更该先解决的是「没提交」，不是「次数不够」 |
 | 跑着跑着报 `InternalServerError: Connection error.` 或 502/503 | 这是**瞬时故障**（网络抖动 / 代理不稳 / 中途站过载），现在会**自动退避重试**（5s 起跳），时间线显示「连接中断…重试中」。若重试后仍失败：重跑一次通常就好，反复出现就检查本机代理或换端点。**已定位并核验过的结论照常交付**，不会白跑 |
 | 跑着跑着报 `RateLimitError`（网关限流，如"1 分钟最多 10 次"） | 通常**不用配**：端点在响应头里声明了限额（`x-ratelimit-limit-requests: 10, 10;w=60`）就自动按那个节奏走；只说话术的也认（中英文都行）。想看当前生效的节奏：`GET /api/health` 的 `llm_pacing`，或跑一次自检（结论里会写「端点限额已识别（来自响应头）——每 6.0s 一次调用」）。要手动钉住就写 `PAPERLENS_LLM_MAX_REQUESTS_PER_MINUTE=10` 再重启后端。**撞到 429 会自动退避重试**（时间线显示「端点限流，等待 Ns 后重试」）；**额度用尽/欠费不会重试**（直接告诉你重试无用）；**TPM（token/分钟）**会按 token 节流并建议减少上下文。**已定位到的结论不会丢**——失败也会交付并核验已确认的部分 |
 
@@ -251,7 +252,7 @@ backend/app/agent/tools/findings.py      record_plan（阶段 A）+ record_findi
 backend/devtools/mock_provider.py  本地假端点（离线验收 / 零成本试用）
 backend/scripts/harness.py         验收脚本公用件
 backend/scripts/m1_check.py        M1 验收脚本（80 项断言）
-backend/scripts/m2_check.py        M2 验收脚本（166 项断言）
+backend/scripts/m2_check.py        M2 验收脚本（174 项断言）
 backend/tests/repo_fixture.py      合成测试仓库（内容自洽：有低秩实现、没有冻结主干）
 backend/tests/paper_fixture.py     合成论文 PDF（测试数据可复现）
 frontend/app/page.tsx              主页面：provider 表单 / 上传 / 仓库 / 清单 / 时间线 / 对照
