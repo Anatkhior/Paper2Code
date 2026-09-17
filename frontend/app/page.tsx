@@ -334,13 +334,23 @@ export default function Home() {
     }
   }, [chatReplyCount, refreshChat]);
 
-  // 正在流式输出的那一轮回答
+  /**
+   * 正在流式输出的那一轮回答。
+   *
+   * 关键：**一旦这轮回答已经落盘（chat_reply 出现在 chat_user 之后），就返回空**。
+   * 否则 ChatPanel 会同时渲染"服务端对话记录里的回答"和"事件流里残留的流式文本"——
+   * 用户看到同一段回答出现两次（2026-09-16 用户实测反馈：
+   * "一句疑问 agent 会回复我两次内容"）。后端本身有并发保护（同一 run 同时只允许一个阶段，409），
+   * 所以这纯粹是前端重复渲染。
+   */
   const chatStreaming = useMemo(() => {
     let lastUserIndex = -1;
+    let lastReplyIndex = -1;
     events.forEach((event, index) => {
       if (event.type === "chat_user") lastUserIndex = index;
+      if (event.type === "chat_reply") lastReplyIndex = index;
     });
-    if (lastUserIndex < 0) return "";
+    if (lastUserIndex < 0 || lastReplyIndex > lastUserIndex) return "";
     return events
       .slice(lastUserIndex + 1)
       .filter((event) => event.type === "assistant_text")

@@ -215,6 +215,10 @@ async def section_e(check: Checker, client: httpx.AsyncClient) -> None:
 
     _, reply = await ask(client, check, run_id, "这篇论文的核心思路是什么？")
     check(bool(reply.get("message")), "没有克隆仓库时照样能回答")
+    check(
+        "没能在预算内给出回答" not in str(reply.get("message")),
+        f"回答是真的答了，不是烧完预算的兜底文案：{str(reply.get('message'))[:60]}…",
+    )
     check((reply.get("citations") or []) == [], "没有仓库就不会凭空给出代码位置")
 
 
@@ -223,45 +227,52 @@ async def section_e(check: Checker, client: httpx.AsyncClient) -> None:
 # ---------------------------------------------------------------------------
 async def section_f(check: Checker) -> None:
     check.section("F. 界面：追问入口")
-    if os.environ.get("PAPERLENS_SKIP_FRONTEND"):
-        print("   （PAPERLENS_SKIP_FRONTEND 已设置，跳过）", flush=True)
-        return
-    if not (FRONTEND / "node_modules").exists() or not shutil.which("pnpm"):
-        check(False, "前端依赖或 pnpm 不可用")
-        return
 
-    build = subprocess.run(
-        ["pnpm", "build"], cwd=FRONTEND, env=frontend_env(), capture_output=True, text=True, timeout=600
-    )
-    check(build.returncode == 0, "pnpm build 通过")
-    if build.returncode != 0:
-        print((build.stdout + build.stderr)[-1200:], flush=True)
-        return
+# ---------------------------------------------------------------------------
+# G. 一问一答：落盘的轮次与回答格式
+# ---------------------------------------------------------------------------
+async def section_g(check: Checker, client: httpx.AsyncClient) -> None:
+    """一次提问只产生一条回答；回答原样保存 markdown（由前端渲染）。
 
-    server = subprocess.Popen(
-        [str(FRONTEND / "node_modules" / ".bin" / "next"), "start", "-p", str(FRONTEND_PORT)],
-        cwd=FRONTEND,
-        env=frontend_env(),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    2026-09-16 用户反馈「一句疑问 agent 回复我两次内容」。定位结论：后端没问题
+    （同一 run 同时只允许一个阶段，第二个请求会 409），**是前端把"服务端对话记录里的回答"
+    与"事件流里残留的 assistant_text"各渲染了一遍**。这里钉住数据前提，
+    前端那条规则（chat_reply 出现后不再显示流式文本）与它配套。
+    """
+    check.section("G. 一问一答：轮次与回答格式")
+
+    # 用一个"已经跑完定位（有仓库、有产物）"的 run —— 这才是用户真实追问的场景
+    run_id = await prepare_analyzed_run(client, check)
+
+    question = "这个低秩分支的缩放系数到底在哪用到的？"
+    started = await client.post(
+        f"/api/runs/{run_id}/chat", json={"provider": provider("mock-model"), "message": question}
     )
-    try:
-        await wait_http(f"http://127.0.0.1:{FRONTEND_PORT}/", timeout=60)
-        async with httpx.AsyncClient() as plain:
-            html = (await plain.get(f"http://127.0.0.1:{FRONTEND_PORT}/", timeout=30)).text
-        for marker, description in {
-            "7. 追问": "追问面板（现在位于对照阅读器与逐条结论之间）",
-            "它可以自己去翻论文和代码": "能力说明（每条消息的预算）",
-            "还没问过": "空状态引导",
-            "就这条追问": "从结论卡片发起追问",
-        }.items():
-            check(marker in html, f"页面里有「{description}」（{marker}）")
-    finally:
-        server.terminate()
-        try:
-            server.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            server.kill()
+    check(started.status_code == 200, f"追问已受理（HTTP {started.status_code}）")
+
+    turns: list[dict[str, Any]] = []
+    for _ in range(120):
+        turns = ((await client.get(f"/api/runs/{run_id}/chat")).json().get("turns") or [])
+        if any(turn["role"] == "assistant" for turn in turns):
+            break
+        await asyncio.sleep(0.5)
+
+    assistant_turns = [turn for turn in turns if turn["role"] == "assistant"]
+    check(len(turns) >= 2, f"对话记录里有问答两轮（实际 {len(turns)} 轮）")
+    check(
+        turns and turns[0]["role"] == "user" and turns[0]["text"] == question,
+        "用户那一轮原样落盘（刷新页面能恢复）",
+    )
+    check(
+        len(assistant_turns) == 1,
+        f"**一次提问只落盘一条回答**（实际 {len(assistant_turns)} 条）——前端不该再重复渲染残留的流式文本",
+    )
+    if assistant_turns:
+        text = assistant_turns[0]["text"]
+        check(
+            "**" in text or "\n\n" in text,
+            "回答原样保留 markdown（粗体/空行分段），交给前端渲染，而不是后端把标记剥掉",
+        )
 
 
 async def main() -> int:
@@ -281,6 +292,7 @@ async def main() -> int:
             await section_c(check, client, run_id)
             await section_d(check, client, run_id)
             await section_e(check, client)
+            await section_g(check, client)   # 需要 client：放在 async with 里面
 
         await section_f(check)
         return check.finish()

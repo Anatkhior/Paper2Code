@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import Markdown from "@/components/Markdown";
+
 export interface ChatCitation {
   path: string;
   line_start: number;
@@ -110,7 +112,7 @@ export default function ChatPanel({
                   : "bg-neutral-100 dark:bg-neutral-900"
               }`}
             >
-              <p className="whitespace-pre-wrap">{turn.text}</p>
+              <Markdown text={turn.text} />
             </div>
 
             {turn.role === "assistant" && (
@@ -152,7 +154,7 @@ export default function ChatPanel({
         {streaming && (
           <div>
             <div className="inline-block max-w-[92%] rounded-lg bg-neutral-100 px-3 py-2 text-sm dark:bg-neutral-900">
-              <p className="whitespace-pre-wrap">{streaming}</p>
+              <Markdown text={streaming} />
             </div>
             <p className="mt-1 text-[11px] text-neutral-500">正在回答…</p>
           </div>

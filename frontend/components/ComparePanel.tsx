@@ -1,6 +1,7 @@
 "use client";
 
 import type { Finding, VerificationSummary } from "@/lib/types";
+import Markdown from "@/components/Markdown";
 
 interface Props {
   findings: Finding[];
@@ -146,7 +147,7 @@ export default function ComparePanel({
                 <div className="mt-3">
                   <h5 className="mb-1 text-[11px] font-semibold text-neutral-500">它在做什么</h5>
                   <p className="text-xs leading-relaxed text-neutral-700 dark:text-neutral-300">
-                    {finding.explanation.intuition}
+                    <Markdown text={finding.explanation.intuition} />
                   </p>
                 </div>
               )}
@@ -168,7 +169,7 @@ export default function ComparePanel({
                 <div className="rounded border border-neutral-200 p-2 text-xs dark:border-neutral-800">
                   <p className="text-neutral-700 dark:text-neutral-300">
                     <span className="text-neutral-500">为什么判断没有实现：</span>
-                    {finding.not_found_reason}
+                    <Markdown text={finding.not_found_reason ?? ""} />
                   </p>
                   {finding.searched.length > 0 && (
                     <div className="mt-2 flex flex-wrap items-center gap-1">
@@ -208,7 +209,7 @@ export default function ComparePanel({
                         <VerifyBadge state={evidence.verification?.state} />
                         <span className="ml-auto text-[11px] text-neutral-400">点开看代码 ↗</span>
                       </div>
-                      <p className="mt-1 text-xs text-neutral-700 dark:text-neutral-300">{evidence.why}</p>
+                      <p className="mt-1 text-xs text-neutral-700 dark:text-neutral-300"><Markdown text={evidence.why ?? ""} /></p>
                       {evidence.verification?.failures?.length ? (
                         <ul className="mt-1 list-disc pl-4 text-[11px] text-red-600">
                           {evidence.verification.failures.map((failure) => (
@@ -233,7 +234,7 @@ export default function ComparePanel({
                     {finding.explanation.code_walkthrough.map((step, stepIndex) => (
                       <li key={stepIndex} className="rounded border border-neutral-200 p-2 text-xs dark:border-neutral-800">
                         <code className="font-mono text-[11px] text-neutral-500">{step.line_ref}</code>
-                        <p className="mt-0.5 text-neutral-700 dark:text-neutral-300">{step.text}</p>
+                        <p className="mt-0.5 text-neutral-700 dark:text-neutral-300"><Markdown text={step.text ?? ""} /></p>
                       </li>
                     ))}
                   </ol>

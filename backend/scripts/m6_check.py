@@ -330,6 +330,12 @@ async def section_c(check: Checker) -> None:
             not any('block:"end"' in text for text in texts),
             "旧的 window-stealing 写法（scrollIntoView block:end）已从产物里消失",
         )
+        # 追问回答与结论解释都是 markdown，必须经渲染器（自写的安全渲染器，类名 md-list 是它的标记）。
+        # 它只被 ChatPanel / ComparePanel 引用：出现在产物里就说明这条链路真的接上了。
+        check(
+            any("md-list" in text for text in texts),
+            "markdown 渲染器进了打包产物（回答不再把 **粗体** 这类标记原样显示）",
+        )
     finally:
         server.terminate()
         try:

@@ -614,8 +614,13 @@ def chat_action(messages: list[dict[str, Any]], model: str, tool_names: list[str
 
 def _choose(messages: list[dict[str, Any]], model: str, tool_names: list[str]) -> list[str]:
     """返回本次要发出的 SSE chunk 列表。"""
-    # 对话阶段：论文工具和仓库工具同时在（侦察只有论文工具，定位只有仓库工具）
-    if "list_pages" in tool_names and "repo_tree" in tool_names:
+    # 对话阶段：论文工具和仓库工具同时在（侦察只有论文工具，定位只有仓库工具）。
+    # 另外**没有仓库时的追问**也只有论文工具——那和侦察的工具清单一样，只能靠提问文本区分：
+    # 追问的用户提示里一定带「## 已有的分析结果」（见 build_chat_user_prompt）。
+    # 不区分的话，没克隆仓库的追问会掉进侦察剧本、一直调用 record_plan 直到把预算烧光
+    # （2026-09-17 实测：回答变成"这次没能在预算内给出回答"）。
+    looks_like_chat = any("## 已有的分析结果" in str(m.get("content") or "") for m in messages)
+    if "list_pages" in tool_names and ("repo_tree" in tool_names or looks_like_chat):
         return chat_action(messages, model, tool_names)
 
     if "repo_tree" in tool_names:
