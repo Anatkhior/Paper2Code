@@ -311,15 +311,24 @@ async def section_c(check: Checker) -> None:
         )
         check(notes_hit, "仓库就绪行显示「另有 N 个未下载」（源码视图克隆跳过了什么，用户看得见）")
 
-        # 阅读器：① PDF 视图用浏览器内置查找高亮同一段；② 高亮自动进视野（用户不用自己翻）
-        reader_hit = any(
-            "内置查找" in chunk.read_text(encoding="utf-8", errors="ignore")
-            and "scrollIntoView" in chunk.read_text(encoding="utf-8", errors="ignore")
-            for chunk in (FRONTEND / ".next" / "static" / "chunks").rglob("*.js")
+        # 阅读器（2026-09-16 用户反馈后重做）：
+        #   ① 原版页面视图 = 服务端渲染图 + 我们自己叠的高亮框（浏览器内置阅读器不让脚本碰 DOM，
+        #      `#search=` 在 Chrome 上不生效，所以只能自己画）；
+        #   ② 时间线/追问的"自动跟到最新"只滚自己的容器（scrollHeight/clientHeight），
+        #      不再用 scrollIntoView 把整个窗口拽走。
+        chunks = list((FRONTEND / ".next" / "static" / "chunks").rglob("*.js"))
+        texts = [chunk.read_text(encoding="utf-8", errors="ignore") for chunk in chunks]
+        check(
+            any("highlight_rects" in text for text in texts),
+            "原版页面视图：高亮框数据（highlight_rects）进了打包产物",
         )
         check(
-            reader_hit,
-            "对照阅读器：PDF 内置查找高亮 + 高亮自动进视野 都进了打包产物",
+            any("scrollHeight" in text and "clientHeight" in text for text in texts),
+            "自动滚动改为容器内跟随（scrollHeight/clientHeight），不再动窗口",
+        )
+        check(
+            not any('block:"end"' in text for text in texts),
+            "旧的 window-stealing 写法（scrollIntoView block:end）已从产物里消失",
         )
     finally:
         server.terminate()

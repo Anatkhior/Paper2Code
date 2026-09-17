@@ -5,7 +5,7 @@
     "base_url": "http://127.0.0.1:8231/v1",
     "model": "mock-model"
   },
-  "generated_at": "2026-09-16T22:40:39",
+  "generated_at": "2026-09-17T10:48:29",
   "goldset": "eval/goldset.yaml",
   "aggregate": {
     "pairs": 1,
@@ -91,7 +91,7 @@
           "required_paths": []
         }
       ],
-      "run_id": "20260916-224037-e7f1ca",
+      "run_id": "20260917-104827-b9521e",
       "wall_clock_seconds": 1.4
     }
   ]

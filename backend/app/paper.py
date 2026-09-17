@@ -97,6 +97,77 @@ class PaperDocument:
             cached.write_text(text, encoding="utf-8")
         return text
 
+    # -- 原版页面：渲染图 + 高亮矩形（给前端"PDF 视图也高亮"用，2026-09-16）-------
+    def _image_path(self, page: int, dpi: int) -> Path | None:
+        if not self.cache_dir:
+            return None
+        return self.cache_dir / "pages" / f"p{page:04d}@{dpi}.png"
+
+    def page_image(self, page: int, dpi: int = 150) -> tuple[bytes, str]:
+        """把某一页渲染成 PNG（带磁盘缓存）。返回 (字节, media_type)。
+
+        为什么前端不再直接内嵌浏览器 PDF 阅读器：内置阅读器**不允许外部脚本操作它内部的 DOM**，
+        所以"在 PDF 原版里高亮同一段"没法用 iframe 做到（`#search=` 在 Chrome 上并不生效，
+        2026-09-16 用户实测）。改成"服务端渲染该页 + 按页码坐标叠高亮框"：
+        任何浏览器行为一致，而且用的是核验引文的同一个库（PyMuPDF），高亮位置和核验口径一致。
+        """
+        if not 1 <= page <= self.page_count:
+            raise ValueError(f"页码 {page} 超出范围（这篇论文共 {self.page_count} 页）")
+        cached = self._image_path(page, dpi)
+        if cached and cached.exists():
+            return cached.read_bytes(), "image/png"
+        pixmap = self._open()[page - 1].get_pixmap(dpi=dpi)
+        data = pixmap.tobytes("png")
+        if cached:
+            cached.write_bytes(data)
+        return data, "image/png"
+
+    def page_box(self, page: int) -> tuple[float, float]:
+        """页面尺寸（PDF 点，1/72 英寸）。前端按它把高亮矩形换算成百分比。"""
+        if not 1 <= page <= self.page_count:
+            raise ValueError(f"页码 {page} 超出范围（这篇论文共 {self.page_count} 页）")
+        rect = self._open()[page - 1].rect
+        return float(rect.width), float(rect.height)
+
+    def quote_rects(self, page: int, quote: str, *, max_rects: int = 40) -> list[tuple[float, float, float, float]]:
+        """在某一页里找出引文的位置（PDF 点坐标）。
+
+        策略由严到松，命中即返回（和"引文核验"一样，不许把没有的东西画成有）：
+          ① 整段引文；② 前 8 个词；③ 前 5 个词；④ 折行/空白压平后的前 8 个词。
+        都找不到就返回空 —— 前端会如实显示"这一页没定位到高亮"，而不是画一个假框。
+        """
+        if not 1 <= page <= self.page_count:
+            raise ValueError(f"页码 {page} 超出范围（这篇论文共 {self.page_count} 页）")
+        # 注意：这里**不能**用 _squash（那是给"比较引文"用的，它会把空白全删掉，
+        # 于是 "Low-rank reparameterization…" 变成一整串，PDF 里当然搜不到）。
+        # 这里要的是"显示用"的归一化：折叠成单个空格、保留大小写。
+        target = " ".join(quote.split())
+        if not target:
+            return []
+        words = target.split(" ")
+        candidates = [
+            target,
+            " ".join(words[:8]),
+            " ".join(words[:5]),
+            " ".join(words[:3]),
+        ]
+        seen: set[str] = set()
+        pdf_page = self._open()[page - 1]
+        for attempt, candidate in enumerate(candidates):
+            candidate = candidate.strip()
+            if len(candidate) < 4 or candidate in seen:
+                continue
+            seen.add(candidate)
+            # 第一次允许"跨连字符折行"的匹配（引文经常横跨两行）
+            flags = pymupdf.TEXT_DEHYPHENATE if attempt == 0 else 0
+            hits = pdf_page.search_for(candidate, flags=flags)
+            if hits:
+                return [
+                    (float(hit.x0), float(hit.y0), float(hit.x1), float(hit.y1))
+                    for hit in hits[:max_rects]
+                ]
+        return []
+
     def page_stats(self) -> list[PageStats]:
         stats: list[PageStats] = []
         for page in range(1, self.page_count + 1):

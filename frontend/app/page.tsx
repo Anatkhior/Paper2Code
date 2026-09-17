@@ -10,19 +10,20 @@ import ProviderForm from "@/components/ProviderForm";
 import Reader, { type CodePane, type PaperPane } from "@/components/Reader";
 import Timeline from "@/components/Timeline";
 import {
-  API_BASE,
   addPlanItem,
+  API_BASE,
   createRun,
-  fetchChat,
-  postChat,
   deletePlanItem,
   eventsUrl,
+  fetchChat,
   fetchFile,
   fetchPaperPage,
   fetchPlan,
   healthUrl,
-  pdfUrl,
+  paperPageImageUrl,
   patchPlanItem,
+  pdfUrl,
+  postChat,
   smokeTest,
   startLocate,
   startRecon,
@@ -97,8 +98,19 @@ export default function Home() {
       setPaperPane({ page, quote, loading: true, error: null });
       scrollToReader();
       try {
-        const view = await fetchPaperPage(runId, page);
-        setPaperPane({ page, quote, text: view.text, pageCount: view.page_count, loading: false, error: null });
+        // 带上引文：后端会返回"引文在这一页上的高亮矩形"，原版页面据此叠高亮框
+        const view = await fetchPaperPage(runId, page, quote);
+        setPaperPane({
+          page,
+          quote,
+          text: view.text,
+          pageCount: view.page_count,
+          pageWidth: view.page_width,
+          pageHeight: view.page_height,
+          rects: view.highlight_rects ?? [],
+          loading: false,
+          error: null,
+        });
       } catch (caught) {
         setPaperPane({ page, quote, loading: false, error: String(caught) });
       }
@@ -658,6 +670,7 @@ export default function Home() {
             left={paperPane}
             right={codePane}
             pdfUrl={runId ? pdfUrl(runId) : null}
+            pageImageUrl={runId ? (page: number) => paperPageImageUrl(runId, page) : null}
             onGoToPage={(page) => openPaper(page, paperPane?.quote ?? "")}
             onSelectTarget={addTarget}
           />

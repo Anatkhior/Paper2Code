@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -747,8 +747,13 @@ async def run_pdf(run_id: str) -> FileResponse:
 
 
 @app.get("/api/runs/{run_id}/paper/page/{page}")
-async def run_paper_page(run_id: str, page: int) -> dict[str, Any]:
-    """读论文某一页的原文。左栏点"第 N 页"时用。"""
+async def run_paper_page(run_id: str, page: int, quote: str = "") -> dict[str, Any]:
+    """读论文某一页的原文。左栏点"第 N 页"时用。
+
+    带 `?quote=` 时顺带给出**引文在这一页上的高亮矩形**（PDF 点坐标）与页面尺寸，
+    前端"原版页面"视图据此叠高亮框——因为浏览器内置 PDF 阅读器不允许外部脚本碰它的 DOM，
+    所以高亮必须由我们自己画（2026-09-16 用户实测 `#search=` 在 Chrome 上不生效）。
+    """
     _registry(run_id)
     pdf = store.paper_path(run_id)
     if not pdf.exists():
@@ -759,11 +764,17 @@ async def run_paper_page(run_id: str, page: int) -> dict[str, Any]:
     try:
         if not 1 <= page <= doc.page_count:
             raise HTTPException(status_code=422, detail=f"页码 {page} 超出范围（共 {doc.page_count} 页）")
+        width, height = doc.page_box(page)
+        rects = doc.quote_rects(page, quote) if quote.strip() else []
         return {
             "page": page,
             "page_count": doc.page_count,
             "title_guess": doc.title_guess,
             "text": doc.page_text(page),
+            "page_width": width,
+            "page_height": height,
+            # [[x0,y0,x1,y1], …]，PDF 点；找不到就是空数组（前端如实说明，不画假框）
+            "highlight_rects": [[round(v, 2) for v in rect] for rect in rects],
         }
     finally:
         doc.close()
@@ -851,6 +862,30 @@ async def run_detail(run_id: str) -> dict[str, Any]:
         "meta": store.read_meta(run_id),
         "events": run.bus.history or load_events(store.events_path(run_id)),
     }
+
+
+@app.get("/api/runs/{run_id}/paper/page/{page}/image")
+async def run_paper_page_image(run_id: str, page: int, dpi: int = 150) -> Response:
+    """把论文某一页渲染成 PNG，给"原版页面（带高亮框）"用。
+
+    为什么不是直接内嵌原 PDF：内置阅读器不让脚本注入高亮（见上面那个端点的说明）。
+    渲染图 + 我们自己叠的高亮框 → 任何浏览器表现一致，公式与图也照旧是原样渲染出来的。
+    """
+    _registry(run_id)
+    pdf = store.paper_path(run_id)
+    if not pdf.exists():
+        raise HTTPException(status_code=409, detail="这个 run 还没有论文")
+    directory = store.run_dir(run_id)
+    doc = PaperDocument(pdf, cache_dir=directory / "cache")
+    try:
+        data, media_type = doc.page_image(page, dpi=max(72, min(dpi, 300)))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
 
 
 @app.post("/api/runs/{run_id}/cancel")

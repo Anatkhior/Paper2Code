@@ -138,6 +138,11 @@ export interface PaperPageView {
   page_count: number;
   title_guess: string;
   text: string;
+  /** 页面尺寸（PDF 点）：把高亮矩形换算成百分比用 */
+  page_width: number;
+  page_height: number;
+  /** 引文在这一页上的高亮矩形 [[x0,y0,x1,y1], …]（PDF 点）；为空表示这一页没定位到 */
+  highlight_rects: number[][];
 }
 
 /** 读某个 commit 上的一段代码。后端的核验也是读这份内容，所以两边必然一致。 */
@@ -162,8 +167,18 @@ export function pdfUrl(runId: string) {
   return `${API_BASE}/api/runs/${runId}/pdf`;
 }
 
-export async function fetchPaperPage(runId: string, page: number): Promise<PaperPageView> {
-  return jsonOrThrow(await fetch(`${API_BASE}/api/runs/${runId}/paper/page/${page}`));
+export async function fetchPaperPage(
+  runId: string,
+  page: number,
+  quote?: string,
+): Promise<PaperPageView> {
+  const query = quote && quote.trim() ? `?quote=${encodeURIComponent(quote)}` : "";
+  return jsonOrThrow(await fetch(`${API_BASE}/api/runs/${runId}/paper/page/${page}${query}`));
+}
+
+/** 论文某一页的渲染图（服务端 PyMuPDF 渲染，前端在它上面叠高亮框）。 */
+export function paperPageImageUrl(runId: string, page: number, dpi = 150) {
+  return `${API_BASE}/api/runs/${runId}/paper/page/${page}/image?dpi=${dpi}`;
 }
 
 /**

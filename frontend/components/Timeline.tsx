@@ -101,10 +101,22 @@ function describe(event: RunEvent): { icon: string; title: string; detail?: stri
 
 export default function Timeline({ events }: { events: RunEvent[] }) {
   const items = toItems(events);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollerRef = useRef<HTMLDivElement>(null);
 
+  /**
+   * 自动跟到最新一条，但**只滚这个容器，绝不滚动窗口**。
+   *
+   * 原来用 `bottomRef.scrollIntoView({block:"end"})`：scrollIntoView 会一路滚所有可滚祖先，
+   * 包括 window —— 于是"追问"产生新事件时，页面会被拽到时间线（页面靠上的位置），
+   * 用户正在看的追问面板被顶走（2026-09-16 用户实测反馈）。
+   * 另外只有"用户本来就在底部"时才跟随，否则会打断他往回翻看历史。
+   */
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "end" });
+    const box = scrollerRef.current;
+    if (!box) return;
+    const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+    if (!nearBottom) return;
+    box.scrollTop = box.scrollHeight;
   }, [events.length]);
 
   if (events.length === 0) {
@@ -122,7 +134,10 @@ export default function Timeline({ events }: { events: RunEvent[] }) {
   const start = events[0]?.ts ?? 0;
 
   return (
-    <div className="max-h-[70vh] overflow-y-auto rounded-lg border border-neutral-200 bg-white p-3 dark:border-neutral-800 dark:bg-neutral-950">
+    <div
+      ref={scrollerRef}
+      className="max-h-[70vh] overflow-y-auto rounded-lg border border-neutral-200 bg-white p-3 dark:border-neutral-800 dark:bg-neutral-950"
+    >
       <ol className="space-y-1.5">
         {items.map((item) => {
           if (item.kind === "text") {
@@ -148,7 +163,6 @@ export default function Timeline({ events }: { events: RunEvent[] }) {
           );
         })}
       </ol>
-      <div ref={bottomRef} />
     </div>
   );
 }

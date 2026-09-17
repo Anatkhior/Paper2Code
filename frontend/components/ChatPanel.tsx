@@ -63,10 +63,18 @@ export default function ChatPanel({
   onOpenCitation,
 }: Props) {
   const [draft, setDraft] = useState("");
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollerRef = useRef<HTMLDivElement>(null);
 
+  /**
+   * 同 Timeline：只滚自己的容器，不碰窗口（scrollIntoView 会把整个页面也滚走），
+   * 并且只在你本来就在底部时才跟随新消息。
+   */
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: "end" });
+    const box = scrollerRef.current;
+    if (!box) return;
+    const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+    if (!nearBottom) return;
+    box.scrollTop = box.scrollHeight;
   }, [turns.length, streaming]);
 
   const submit = () => {
@@ -85,7 +93,7 @@ export default function ChatPanel({
         </span>
       </header>
 
-      <div className="max-h-[52vh] min-h-[160px] space-y-3 overflow-auto p-3">
+      <div ref={scrollerRef} className="max-h-[52vh] min-h-[160px] space-y-3 overflow-auto p-3">
         {turns.length === 0 && !streaming && (
           <p className="text-sm text-neutral-500">
             还没问过。已经帮你把整份分析结果（创新点、论文证据、代码引用、解释）放在它的上下文里，
@@ -149,7 +157,6 @@ export default function ChatPanel({
             <p className="mt-1 text-[11px] text-neutral-500">正在回答…</p>
           </div>
         )}
-        <div ref={bottomRef} />
       </div>
 
       <div className="border-t border-neutral-200 p-3 dark:border-neutral-800">

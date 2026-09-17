@@ -169,6 +169,42 @@ async def section_a(check: Checker, client: httpx.AsyncClient) -> str:
     out_of_range = await client.get(f"/api/runs/{run_id}/paper/page/99")
     check(out_of_range.status_code == 422, f"页码越界 → 422（HTTP {out_of_range.status_code}）")
 
+    # ---- 原版页面视图：引文高亮框 + 页面渲染图（2026-09-16 用户反馈"PDF 那边没高亮"）----
+    # 为什么后端给矩形：浏览器内置 PDF 阅读器不允许外部脚本碰它的 DOM（`#search=` 在 Chrome 上
+    # 也不生效），所以"在 PDF 原版里高亮同一段"只能靠"服务端渲染该页 + 我们自己叠高亮框"。
+    located = await client.get(f"/api/runs/{run_id}/paper/page/3", params={"quote": KEY_QUOTE})
+    located_body = located.json()
+    check(
+        (located_body.get("page_width") or 0) > 0 and (located_body.get("page_height") or 0) > 0,
+        f"返回页面尺寸（{located_body.get('page_width')}×{located_body.get('page_height')} 点）——"
+        "前端要把矩形换算成百分比才不会错位",
+    )
+    rects = located_body.get("highlight_rects") or []
+    check(len(rects) >= 1, f"引文在这一页上被定位到（{len(rects)} 个高亮框）")
+    if rects:
+        x0, y0, x1, y1 = rects[0]
+        check(
+            0 <= x0 < x1 <= (located_body.get("page_width") or x1)
+            and 0 <= y0 < y1 <= (located_body.get("page_height") or y1),
+            f"矩形落在页面内且非空：{(round(x0), round(y0), round(x1), round(y1))}",
+        )
+    nothing = await client.get(
+        f"/api/runs/{run_id}/paper/page/3", params={"quote": "a sentence that is definitely not in this paper"}
+    )
+    check(
+        (nothing.json().get("highlight_rects") or []) == [],
+        "找不到就返回空数组——**不许画假框**（前端会如实说明这一页没定位到）",
+    )
+    image = await client.get(f"/api/runs/{run_id}/paper/page/3/image", params={"dpi": 150})
+    check(image.status_code == 200, f"页面渲染图可用（HTTP {image.status_code}）")
+    check(
+        image.headers.get("content-type", "").startswith("image/png")
+        and image.content[:4] == bytes([0x89]) + b"PNG",
+        f"返回的是真 PNG（{len(image.content) // 1024}KB）",
+    )
+    bad_image = await client.get(f"/api/runs/{run_id}/paper/page/99/image")
+    check(bad_image.status_code == 422, f"渲染越界页 → 422（HTTP {bad_image.status_code}）")
+
     # ---- PDF 原版（交给浏览器自带阅读器，才能看到真实排版/公式/图）----
     pdf_response = await client.get(f"/api/runs/{run_id}/pdf")
     check(pdf_response.status_code == 200, f"PDF 直链可用（HTTP {pdf_response.status_code}）")

@@ -20,6 +20,10 @@ export interface PaperPane {
   quote?: string;
   text?: string;
   pageCount?: number;
+  /** 页面尺寸（PDF 点）与引文高亮矩形（PDF 点），原版页面视图用它们叠高亮框 */
+  pageWidth?: number;
+  pageHeight?: number;
+  rects?: number[][];
   loading: boolean;
   error?: string | null;
 }
@@ -29,8 +33,10 @@ type PaperMode = "pdf" | "text";
 interface Props {
   left: PaperPane | null;
   right: CodePane | null;
-  /** 论文 PDF 的直链（用浏览器自带的阅读器渲染真实排版） */
+  /** 论文 PDF 的直链：给"在新标签页打开原版"用（不再是嵌入方式，见下） */
   pdfUrl?: string | null;
+  /** 论文页渲染图的地址前缀（服务端渲染，前端叠高亮框） */
+  pageImageUrl?: ((page: number) => string) | null;
   onGoToPage: (page: number) => void;
   /** 用户划选原文后，把这一段作为定位目标加进清单 */
   onSelectTarget?: (quote: string, page: number) => void;
@@ -66,26 +72,18 @@ function locateQuote(text: string, quote?: string) {
  * 1. **两边都要尽可能大**：占满可用的高度，各自独立滚动（滚代码不会把原文滚走）。
  * 2. 显示的内容与**被核验的内容是同一份**：代码由后端按 commit 从 git 对象里读出来。
  */
-/**
- * 把引文压成适合塞进浏览器 PDF 阅读器 `#search=` 的短词。
- * Chromium / Firefox 的内置阅读器都支持 `#search=`（会在页面里高亮命中），
- * 但太长或带换行的串会匹配不上，所以只取前几个词。
- */
-function pdfSearchTerm(quote?: string) {
-  if (!quote) return "";
-  const cleaned = quote
-    .replace(/[\u201c\u201d"'`]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!cleaned) return "";
-  return cleaned.split(" ").slice(0, 8).join(" ").slice(0, 60);
-}
-
-
-export default function Reader({ left, right, pdfUrl, onGoToPage, onSelectTarget }: Props) {
+export default function Reader({
+  left,
+  right,
+  pdfUrl,
+  pageImageUrl,
+  onGoToPage,
+  onSelectTarget,
+}: Props) {
   const [paperMode, setPaperMode] = useState<PaperMode>("pdf");
   const focusRef = useRef<HTMLDivElement>(null);
   const paperMarkRef = useRef<HTMLElement>(null);
+  const pdfBoxRef = useRef<HTMLDivElement>(null);
   const paperBodyRef = useRef<HTMLDivElement>(null);
   const [selection, setSelection] = useState<{ text: string; x: number; y: number } | null>(null);
   const quoteParts = useMemo(
@@ -111,6 +109,7 @@ export default function Reader({ left, right, pdfUrl, onGoToPage, onSelectTarget
     return () => window.clearTimeout(timer);
   }, [left?.quote, left?.text, left?.page, paperMode, quoteParts]);
 
+
   /**
    * 划选一段原文 → 弹出「以此为目标」。
    * 只认**左栏里**的选中内容：右栏是代码，划选它不该触发这个动作。
@@ -135,12 +134,40 @@ export default function Reader({ left, right, pdfUrl, onGoToPage, onSelectTarget
     });
   }, []);
 
-  // PDF 视图的高亮：浏览器内置阅读器不允许外部脚本操作 DOM，但支持用 `#search=` 触发
-  // 它自己的查找并高亮命中——这是"在 PDF 原版里也高亮同一段"的现实做法。
-  const pdfSearch = useMemo(() => pdfSearchTerm(left?.quote), [left?.quote]);
-  const pdfSrc = pdfUrl
-    ? `${pdfUrl}#page=${left?.page ?? 1}&view=FitH&toolbar=1${pdfSearch ? `&search=${encodeURIComponent(pdfSearch)}` : ""}`
-    : null;
+  // 原版页面视图：**服务端渲染的该页 + 我们自己叠的高亮框**。
+  //
+  // 为什么不用 <iframe> 嵌浏览器自带的 PDF 阅读器：内置阅读器不允许外部脚本操作它内部的 DOM，
+  // `#search=` 在 Chrome 上也不生效（2026-08-16 用户实测：PDF 那边完全没有高亮）。
+  // 现在改成渲染图 + 按 PDF 点坐标换算的百分比定位 → 任何浏览器表现一致，
+  // 而且用的还是核验引文的同一个库（PyMuPDF），高亮位置和"引用可核验"口径一致。
+  const rects = left?.rects ?? [];
+  const pageWidth = left?.pageWidth ?? 0;
+  const pageHeight = left?.pageHeight ?? 0;
+  const imageUrl = pageImageUrl && left ? pageImageUrl(left.page) : null;
+  const firstRect = rects[0];
+  const highlightStyle =
+    firstRect && pageWidth > 0 && pageHeight > 0
+      ? {
+          left: `${(firstRect[0] / pageWidth) * 100}%`,
+          top: `${(firstRect[1] / pageHeight) * 100}%`,
+          width: `${((firstRect[2] - firstRect[0]) / pageWidth) * 100}%`,
+          height: `${((firstRect[3] - firstRect[1]) / pageHeight) * 100}%`,
+        }
+      : null;
+
+  /**
+   * 原版页面视图的高亮同样自动进视野：整页图通常比窗格高，只把窗口滚到阅读器还不够，
+   * 得把高亮框在**窗格内部**滚到中间（这里只动容器，不动窗口）。
+   */
+  useEffect(() => {
+    const box = pdfBoxRef.current;
+    if (!box || paperMode !== "pdf" || !highlightStyle || !pageHeight) return;
+    const target = (Number(firstRect?.[1] ?? 0) / pageHeight) * box.scrollHeight;
+    const timer = window.setTimeout(() => {
+      box.scrollTop = Math.max(0, target - box.clientHeight / 2);
+    }, 60);
+    return () => window.clearTimeout(timer);
+  }, [highlightStyle, pageHeight, paperMode, firstRect, left?.page]);
 
   return (
     <div className="relative">
@@ -221,24 +248,45 @@ export default function Reader({ left, right, pdfUrl, onGoToPage, onSelectTarget
 
         {paperMode === "pdf" && (
           <div className="flex min-h-0 flex-1 flex-col bg-neutral-100 dark:bg-neutral-900">
-            {pdfSearch && (
+            {left?.quote && (
               <p className="border-b border-neutral-200 bg-white px-3 py-1 text-[11px] text-neutral-500 dark:border-neutral-800 dark:bg-neutral-950">
-                PDF 视图已跳到第 {left?.page ?? 1} 页，并用浏览器**内置查找**高亮这段引文
-                （浏览器支持范围内；换成「原文文本」能看到精确到字符的高亮）
+                {highlightStyle
+                  ? `已高亮第 ${left.page} 页里的这段引文（框的位置由后端从 PDF 里定位，和引用核验同一个口径）`
+                  : `这一页没定位到这段引文，所以没有画高亮框——切到「原文文本」看它落在哪，或者它本来就不在这一页`}
+                {pdfUrl && (
+                  <>
+                    {" · "}
+                    <a href={`${pdfUrl}#page=${left.page}`} target="_blank" rel="noreferrer" className="underline">
+                      在新标签页打开原版 PDF
+                    </a>
+                  </>
+                )}
               </p>
             )}
-            {pdfSrc ? (
-              // key 里带上页码：只改 URL 的 #fragment 浏览器不会重新加载，换 key 才会真正跳页
-              <iframe
-                // key 里再带上引文：同一页换一段引文时也要重新加载，`#search=` 才会重新执行
-                key={`pdf-${left?.page ?? 1}-${pdfSearch}`}
-                src={pdfSrc}
-                title="论文 PDF"
-                className="h-full w-full border-0"
-              />
-            ) : (
-              <p className="p-3 text-sm text-neutral-500">这份 run 没有可显示的 PDF。</p>
-            )}
+            <div ref={pdfBoxRef} className="relative min-h-0 flex-1 overflow-auto p-2">
+              {imageUrl && left ? (
+                <div className="relative mx-auto w-full max-w-[720px]">
+                  {/* 渲染图铺满容器宽度；高亮框按百分比定位，所以缩放/换屏都不会错位 */}
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={imageUrl}
+                    alt={`论文第 ${left.page} 页`}
+                    className="block w-full rounded border border-neutral-300 bg-white dark:border-neutral-700"
+                  />
+                  {highlightStyle && (
+                    <span
+                      className="pointer-events-none absolute rounded-[2px] bg-amber-300/40 ring-1 ring-amber-500"
+                      style={highlightStyle}
+                      aria-hidden
+                    />
+                  )}
+                </div>
+              ) : (
+                <p className="p-3 text-sm text-neutral-500">
+                  这份 run 没有可显示的 PDF。
+                </p>
+              )}
+            </div>
           </div>
         )}
 

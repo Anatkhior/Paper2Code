@@ -3,7 +3,7 @@
 上传一篇论文 PDF + 粘贴一个 GitHub 仓库链接，系统用 Agent 自主探索，定位论文核心创新点对应的代码实现，
 并给出**可核验**的对照解读。
 
-> 当前状态：**v0（M0–M4）+ v1 三阶段全部完成并验收** —— 36+162+174+44+48+44+42 = **550 项断言**全部离线可复现：
+> 当前状态：**v0（M0–M4）+ v1 三阶段全部完成并验收** —— 36+162+174+51+48+46+42 = **559 项断言**全部离线可复现：
 > `cd backend && ./scripts/run_all_checks.sh`（含前端构建与生产页面渲染、gold set 评估）。
 >
 > v1 已做：**双栏对照阅读器**（左栏可切「PDF 原版（真实排版，滚动看全文）」与「原文文本（可划选）」，
@@ -110,9 +110,9 @@ uv pip install --python .venv/bin/python -r requirements.txt
 .venv/bin/python -m scripts.m0_check   # M0 回归（36 项）
 .venv/bin/python -m scripts.m1_check   # M1 阶段 A（162 项）
 .venv/bin/python -m scripts.m2_check   # M2 阶段 B（174 项）
-.venv/bin/python -m scripts.m3_check   # M3 对照界面 + 前端构建渲染（44 项；跑前先停掉 next dev）
+.venv/bin/python -m scripts.m3_check   # M3 对照界面 + 前端构建渲染（51 项；跑前先停掉 next dev）
 .venv/bin/python -m scripts.m4_check   # M4 gold set + 指标自检 + README 一致性（48 项）
-.venv/bin/python -m scripts.m6_check   # v1② 划选→定位目标（44 项；跑前先停掉 next dev）
+.venv/bin/python -m scripts.m6_check   # v1② 划选→定位目标（46 项；跑前先停掉 next dev）
 .venv/bin/python -m scripts.m7_check   # v1③ 追问对话（42 项；跑前先停掉 next dev）
 
 # 或者一键全跑（推荐）
@@ -199,7 +199,8 @@ curl -s http://127.0.0.1:8000/api/provider/smoke-test \
 | GET | `/api/runs/{id}/events` | 所有阶段的统一 SSE 事件流（`Last-Event-ID` 断线重连） |
 | GET | `/api/runs/{id}` | 事件历史与产物（刷新页面回放） |
 | GET | `/api/runs/{id}/file` | 读某个 commit 上的一段代码（点开引用看原文） |
-| GET | `/api/runs/{id}/paper/page/{n}` | 读论文某一页原文（点开论文证据） |
+| GET | `/api/runs/{id}/paper/page/{n}` | 读论文某一页原文；带 `?quote=` 时同时返回该引文的高亮矩形与页面尺寸（原版页面视图用它画框） |
+| GET | `/api/runs/{id}/paper/page/{n}/image` | 该页的渲染图（PNG，`?dpi=` 可调）：原版页面不内嵌 PDF 阅读器，而是「渲染图 + 自己叠高亮框」 |
 | POST | `/api/runs/{id}/cancel` | 取消运行 |
 
 ## 隐私与安全
