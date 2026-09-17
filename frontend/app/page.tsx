@@ -636,20 +636,6 @@ export default function Home() {
             )}
             {paperReady && !runEnd && <p className="mt-2 text-[11px] text-neutral-500">论文已解析完成</p>}
           </section>
-        </div>
-
-        <div className="space-y-4">
-          <section>
-            <h2 className="mb-2 text-sm font-semibold">3. 创新点清单（勾选后进入阶段 B）</h2>
-            <PlanList
-              plan={plan}
-              selected={selected}
-              onToggle={toggle}
-              onSelectAll={toggleAll}
-              onRename={renameTarget}
-              onDelete={removeTarget}
-            />
-          </section>
 
           <section className="rounded-lg border border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-950">
             <h2 className="mb-3 text-sm font-semibold">4. 代码仓库（阶段 B）</h2>
@@ -696,6 +682,20 @@ export default function Home() {
             </div>
             {/* 默认收起：轨迹是"过程"不是"交付物"，不该跟正文抢地方；要看细节随时展开 */}
             <Timeline events={events} variant="inline" collapsed={!timelineOpen} />
+          </section>
+        </div>
+
+        <div className="space-y-4">
+          <section>
+            <h2 className="mb-2 text-sm font-semibold">3. 创新点清单（勾选后进入阶段 B）</h2>
+            <PlanList
+              plan={plan}
+              selected={selected}
+              onToggle={toggle}
+              onSelectAll={toggleAll}
+              onRename={renameTarget}
+              onDelete={removeTarget}
+            />
           </section>
         </div>
       </div>
