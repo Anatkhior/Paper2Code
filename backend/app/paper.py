@@ -129,44 +129,74 @@ class PaperDocument:
         rect = self._open()[page - 1].rect
         return float(rect.width), float(rect.height)
 
-    def quote_rects(self, page: int, quote: str, *, max_rects: int = 40) -> list[tuple[float, float, float, float]]:
-        """在某一页里找出引文的位置（PDF 点坐标）。
+    def quote_rects(
+        self, page: int, quote: str, *, max_rects: int = 40
+    ) -> tuple[list[tuple[float, float, float, float]], float]:
+        """在某一页里找出引文的位置（PDF 点坐标），并给出**覆盖率**。
 
-        策略由严到松，命中即返回（和"引文核验"一样，不许把没有的东西画成有）：
-          ① 整段引文；② 前 8 个词；③ 前 5 个词；④ 折行/空白压平后的前 8 个词。
-        都找不到就返回空 —— 前端会如实显示"这一页没定位到高亮"，而不是画一个假框。
+        返回 (矩形列表, 覆盖率)。覆盖率 = 匹配到的词数 / 引文总词数。
+
+        为什么要滑窗而不是"整段匹配、失败就退到前缀"：
+        论文引文里常混着公式/符号（比如 `(alpha/r)·BAx`），整段在 PDF 的文本层里逐字匹配不上；
+        旧实现退化成"只匹配前 5~8 个词"——于是用户看到**只高亮了引文的一小截**
+        （2026-09-16 实测反馈"公式的部分高亮的并不全面"）。
+        现在改成：整段试一次，再用 8 词窗口、步长 4 词逐窗匹配，把命中的窗口并起来，
+        覆盖率如实报出去（<1 就说明有部分没匹配上，前端会提示"切原文文本看完整引文"）。
         """
         if not 1 <= page <= self.page_count:
             raise ValueError(f"页码 {page} 超出范围（这篇论文共 {self.page_count} 页）")
-        # 注意：这里**不能**用 _squash（那是给"比较引文"用的，它会把空白全删掉，
-        # 于是 "Low-rank reparameterization…" 变成一整串，PDF 里当然搜不到）。
-        # 这里要的是"显示用"的归一化：折叠成单个空格、保留大小写。
+        # 注意：这里**不能**用 _squash（那是给"比较引文"用的，会把空白全删掉，
+        # "Low-rank reparameterization…" 变成一整串就再也搜不到了）。
         target = " ".join(quote.split())
         if not target:
-            return []
-        words = target.split(" ")
-        candidates = [
-            target,
-            " ".join(words[:8]),
-            " ".join(words[:5]),
-            " ".join(words[:3]),
-        ]
-        seen: set[str] = set()
+            return [], 0.0
         pdf_page = self._open()[page - 1]
-        for attempt, candidate in enumerate(candidates):
-            candidate = candidate.strip()
-            if len(candidate) < 4 or candidate in seen:
+        words = target.split(" ")
+        total_words = len(words)
+
+        def _hits(text: str, flags: int = 0) -> list[tuple[float, float, float, float]]:
+            return [
+                (float(hit.x0), float(hit.y0), float(hit.x1), float(hit.y1))
+                for hit in pdf_page.search_for(text, flags=flags)
+            ]
+
+        # ① 整段（允许跨连字符折行）
+        whole = _hits(target, pymupdf.TEXT_DEHYPHENATE)
+        if whole:
+            return whole[:max_rects], 1.0
+
+        # ② 滑窗：命中的窗口矩形并起来，覆盖率按"命中的词"累计
+        window, step = 8, 4
+        matched: list[tuple[float, float, float, float]] = []
+        matched_indices: set[int] = set()   # 按词下标记账：滑窗有重叠，累加长度会把覆盖率算爆
+        index = 0
+        while index < total_words:
+            chunk_words = words[index : index + window]
+            if len(chunk_words) < 3 and index > 0:
+                break
+            chunk = " ".join(chunk_words)
+            found = _hits(chunk)
+            if found:
+                matched.extend(found)
+                matched_indices.update(range(index, index + len(chunk_words)))
+            if index + window >= total_words:
+                break
+            index += step
+
+        if not matched:
+            return [], 0.0
+
+        # 去重（同一行可能被相邻窗口各匹配到一次）+ 按阅读顺序排序
+        seen: set[tuple[int, int, int, int]] = set()
+        unique: list[tuple[float, float, float, float]] = []
+        for rect in sorted(matched, key=lambda item: (round(item[1], 1), item[0])):
+            key = (round(rect[0]), round(rect[1]), round(rect[2]), round(rect[3]))
+            if key in seen:
                 continue
-            seen.add(candidate)
-            # 第一次允许"跨连字符折行"的匹配（引文经常横跨两行）
-            flags = pymupdf.TEXT_DEHYPHENATE if attempt == 0 else 0
-            hits = pdf_page.search_for(candidate, flags=flags)
-            if hits:
-                return [
-                    (float(hit.x0), float(hit.y0), float(hit.x1), float(hit.y1))
-                    for hit in hits[:max_rects]
-                ]
-        return []
+            seen.add(key)
+            unique.append(rect)
+        coverage = (len(matched_indices) / total_words) if total_words else 0.0
+        return unique[:max_rects], round(coverage, 3)
 
     def page_stats(self) -> list[PageStats]:
         stats: list[PageStats] = []

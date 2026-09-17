@@ -765,7 +765,7 @@ async def run_paper_page(run_id: str, page: int, quote: str = "") -> dict[str, A
         if not 1 <= page <= doc.page_count:
             raise HTTPException(status_code=422, detail=f"页码 {page} 超出范围（共 {doc.page_count} 页）")
         width, height = doc.page_box(page)
-        rects = doc.quote_rects(page, quote) if quote.strip() else []
+        rects, coverage = doc.quote_rects(page, quote) if quote.strip() else ([], 0.0)
         return {
             "page": page,
             "page_count": doc.page_count,
@@ -775,6 +775,9 @@ async def run_paper_page(run_id: str, page: int, quote: str = "") -> dict[str, A
             "page_height": height,
             # [[x0,y0,x1,y1], …]，PDF 点；找不到就是空数组（前端如实说明，不画假框）
             "highlight_rects": [[round(v, 2) for v in rect] for rect in rects],
+            # 高亮**覆盖率**（匹配到的词 / 引文总词数）：<1 说明引文里混着公式/符号等
+            # PDF 文本层匹配不到的部分，前端据此提示"切原文文本看完整引文"
+            "highlight_coverage": coverage if quote.strip() else None,
         }
     finally:
         doc.close()

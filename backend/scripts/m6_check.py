@@ -336,6 +336,11 @@ async def section_c(check: Checker) -> None:
             any("md-list" in text for text in texts),
             "markdown 渲染器进了打包产物（回答不再把 **粗体** 这类标记原样显示）",
         )
+        # 自检通过时只留一句人话（capabilities JSON 挪到失败时才显示）
+        check(
+            any("smoke-compact" in text for text in texts),
+            "自检通过的紧凑样式进了打包产物（成功后不再摆 capabilities JSON）",
+        )
     finally:
         server.terminate()
         try:

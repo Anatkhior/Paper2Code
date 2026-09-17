@@ -188,6 +188,23 @@ async def section_a(check: Checker, client: httpx.AsyncClient) -> str:
             and 0 <= y0 < y1 <= (located_body.get("page_height") or y1),
             f"矩形落在页面内且非空：{(round(x0), round(y0), round(x1), round(y1))}",
         )
+    check(
+        (located_body.get("highlight_coverage") or 0) > 0.99,
+        f"整句引文的高亮覆盖率是 1（实际 {located_body.get('highlight_coverage')}）",
+    )
+    # 引文里混进公式/符号：PDF 文本层匹配不全，但必须**如实报告覆盖了多少**，
+    # 而不是默默只高亮前几个词（2026-09-16 用户反馈"公式的部分高亮的并不全面"）
+    partial_quote = KEY_QUOTE.replace("by four orders of magnitude", "by four orders of magnitude (alpha/r)·BAx")
+    partial = await client.get(f"/api/runs/{run_id}/paper/page/3", params={"quote": partial_quote})
+    partial_body = partial.json()
+    check(
+        0 < (partial_body.get("highlight_coverage") or 0) < 0.999,
+        f"夹杂公式的引文：覆盖率如实小于 1（实际 {partial_body.get('highlight_coverage')}）",
+    )
+    check(
+        len(partial_body.get("highlight_rects") or []) >= 1,
+        f"并且仍然画出了能匹配上的那部分框（{len(partial_body.get('highlight_rects') or [])} 个）",
+    )
     nothing = await client.get(
         f"/api/runs/{run_id}/paper/page/3", params={"quote": "a sentence that is definitely not in this paper"}
     )
@@ -311,6 +328,15 @@ async def section_b(check: Checker) -> None:
         check(
             "上方的对照阅读器会跳到对应位置" in html,
             "逐条结论区的引导文案与新版式一致（点引用 → 上方阅读器跳过去）",
+        )
+        # ④ 行动轨迹默认收起、可随时展开（用户反馈：它占了太多正文空间）
+        check(
+            "展开详细轨迹" in html and 'aria-expanded="false"' in html,
+            "行动轨迹默认收起，并给出「展开详细轨迹」按钮",
+        )
+        check(
+            "收起轨迹" not in html,
+            "默认状态下按钮文案是「展开」而不是「收起」（默认收起）",
         )
     finally:
         server.terminate()

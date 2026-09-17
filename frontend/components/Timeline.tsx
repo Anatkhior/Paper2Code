@@ -99,7 +99,14 @@ function describe(event: RunEvent): { icon: string; title: string; detail?: stri
   }
 }
 
-export default function Timeline({ events }: { events: RunEvent[] }) {
+export default function Timeline({
+  events,
+  collapsed = false,
+}: {
+  events: RunEvent[];
+  /** 收起时只留一小条（仍可滚动、仍跟最新）；展开时给足高度看完整轨迹 */
+  collapsed?: boolean;
+}) {
   const items = toItems(events);
   const scrollerRef = useRef<HTMLDivElement>(null);
 
@@ -136,7 +143,9 @@ export default function Timeline({ events }: { events: RunEvent[] }) {
   return (
     <div
       ref={scrollerRef}
-      className="max-h-[70vh] overflow-y-auto rounded-lg border border-neutral-200 bg-white p-3 dark:border-neutral-800 dark:bg-neutral-950"
+      className={`overflow-y-auto rounded-lg border border-neutral-200 bg-white p-3 dark:border-neutral-800 dark:bg-neutral-950 ${
+        collapsed ? "max-h-[9rem]" : "max-h-[70vh]"
+      }`}
     >
       <ol className="space-y-1.5">
         {items.map((item) => {

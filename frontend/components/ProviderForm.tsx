@@ -108,14 +108,17 @@ export default function ProviderForm({ value, onChange, smoke, smokeBusy, onSmok
         )}
       </div>
 
-      {smoke && (
-        <div
-          className={`mt-3 rounded border p-2 text-xs ${
-            smoke.ok
-              ? "border-green-300 bg-green-50 text-green-900 dark:border-green-900 dark:bg-green-950 dark:text-green-100"
-              : "border-red-300 bg-red-50 text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-100"
-          }`}
-        >
+      {/* 通过时只留一句人话：capabilities 那种 JSON 是给排障用的，成功时摆出来只会挤占视线。
+          不通过才把技术细节（capabilities / 端点探测 / 每轮工具调用）全摊开——那时候它们有用。 */}
+      {smoke?.ok && (
+        <div className="smoke-compact mt-3 rounded border border-green-300 bg-green-50 p-2 text-xs text-green-900 dark:border-green-900 dark:bg-green-950 dark:text-green-100">
+          <p className="font-medium">{smoke.diagnosis}</p>
+          <p className="mt-1 text-[11px] opacity-80">{smoke.provider}</p>
+        </div>
+      )}
+
+      {smoke && !smoke.ok && (
+        <div className="mt-3 rounded border border-red-300 bg-red-50 p-2 text-xs text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-100">
           <p className="font-medium">{smoke.diagnosis}</p>
           <p className="mt-1 font-mono text-[11px] opacity-80">
             {smoke.provider} · capabilities {JSON.stringify(smoke.capabilities)}

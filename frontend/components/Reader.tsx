@@ -24,6 +24,8 @@ export interface PaperPane {
   pageWidth?: number;
   pageHeight?: number;
   rects?: number[][];
+  /** 高亮覆盖率：<1 表示引文里有公式/符号之类在 PDF 文本层匹配不到的部分 */
+  coverage?: number | null;
   loading: boolean;
   error?: string | null;
 }
@@ -251,7 +253,10 @@ export default function Reader({
             {left?.quote && (
               <p className="border-b border-neutral-200 bg-white px-3 py-1 text-[11px] text-neutral-500 dark:border-neutral-800 dark:bg-neutral-950">
                 {highlightStyle
-                  ? `已高亮第 ${left.page} 页里的这段引文（框的位置由后端从 PDF 里定位，和引用核验同一个口径）`
+                  ? (left.coverage ?? 1) < 0.999
+                    ? `已高亮第 ${left.page} 页里的这段引文，但只覆盖了约 ${Math.round((left.coverage ?? 0) * 100)}%` +
+                      "——引文里的公式/符号在 PDF 文本层常常匹配不到，完整引文请看「原文文本」"
+                    : `已高亮第 ${left.page} 页里的这段引文（框的位置由后端从 PDF 里定位，和引用核验同一个口径）`
                   : `这一页没定位到这段引文，所以没有画高亮框——切到「原文文本」看它落在哪，或者它本来就不在这一页`}
                 {pdfUrl && (
                   <>

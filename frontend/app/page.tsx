@@ -63,6 +63,8 @@ export default function Home() {
   const [runId, setRunId] = useState<string | null>(null);
   const [paper, setPaper] = useState<PaperMeta | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
+  // 行动轨迹默认收起（它占用的是正文的空间）；用户的选择记在 localStorage 里
+  const [timelineOpen, setTimelineOpen] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -108,6 +110,7 @@ export default function Home() {
           pageWidth: view.page_width,
           pageHeight: view.page_height,
           rects: view.highlight_rects ?? [],
+          coverage: view.highlight_coverage ?? null,
           loading: false,
           error: null,
         });
@@ -307,6 +310,26 @@ export default function Home() {
   const [chatBusy, setChatBusy] = useState(false);
   const [chatContext, setChatContext] = useState<{ id: string; name: string } | null>(null);
   const chatRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    try {
+      setTimelineOpen(window.localStorage.getItem("paperlens.timelineOpen") === "1");
+    } catch {
+      /* 隐私模式下拿不到 localStorage 也无所谓 */
+    }
+  }, []);
+
+  const toggleTimeline = useCallback(() => {
+    setTimelineOpen((open) => {
+      const next = !open;
+      try {
+        window.localStorage.setItem("paperlens.timelineOpen", next ? "1" : "0");
+      } catch {
+        /* 同上 */
+      }
+      return next;
+    });
+  }, []);
 
   const refreshChat = useCallback(async () => {
     if (!runId) return;
@@ -653,8 +676,22 @@ export default function Home() {
 
         <div className="space-y-4">
           <section>
-            <h2 className="mb-2 text-sm font-semibold">5. Agent 行动轨迹（实时）</h2>
-            <Timeline events={events} />
+            <div className="mb-2 flex items-center gap-2">
+              <h2 className="text-sm font-semibold">5. Agent 行动轨迹（实时）</h2>
+              <span className="text-[11px] text-neutral-500">
+                {events.length > 0 ? `共 ${events.length} 条事件` : "还没开始"}
+              </span>
+              <button
+                type="button"
+                onClick={toggleTimeline}
+                aria-expanded={timelineOpen}
+                className="ml-auto rounded border border-neutral-300 px-2 py-0.5 text-[11px] text-neutral-600 hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
+              >
+                {timelineOpen ? "收起轨迹" : "展开详细轨迹"}
+              </button>
+            </div>
+            {/* 默认收起：轨迹是"过程"不是"交付物"，不该跟正文抢地方；要看细节随时展开 */}
+            <Timeline events={events} collapsed={!timelineOpen} />
           </section>
 
         </div>

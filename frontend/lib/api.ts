@@ -143,6 +143,8 @@ export interface PaperPageView {
   page_height: number;
   /** 引文在这一页上的高亮矩形 [[x0,y0,x1,y1], …]（PDF 点）；为空表示这一页没定位到 */
   highlight_rects: number[][];
+  /** 高亮覆盖率（匹配到的词 / 引文总词数）；<1 说明有公式等匹配不到的部分 */
+  highlight_coverage?: number | null;
 }
 
 /** 读某个 commit 上的一段代码。后端的核验也是读这份内容，所以两边必然一致。 */
