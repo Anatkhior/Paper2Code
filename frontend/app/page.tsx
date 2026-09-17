@@ -664,6 +664,15 @@ export default function Home() {
             </p>
           </section>
 
+          {/* 覆盖率与预算放在仓库下面：读了多少/花了多少/核验率，跟"开始定位"是同一条操作线，
+              也补齐左栏高度让两侧平衡（宽屏六列数字网格在 400px 栏里自动收窄）。 */}
+          <CoverageCard
+            events={events}
+            verification={verification}
+            missingIds={missingIds}
+            filesTotal={filesTotal}
+          />
+
           {/* 窄屏兜底：内联的轨迹（默认收起）。宽屏请用页面右侧的长条侧栏 */}
           <section className="xl:hidden">
             <div className="mb-2 flex items-center gap-2">
@@ -702,13 +711,6 @@ export default function Home() {
 
         {/* 下面是这份系统的交付物本体：论文证据 ↔ 代码引用的双栏对照 */}
         <div className="mt-4 space-y-4">
-          <CoverageCard
-            events={events}
-            verification={verification}
-            missingIds={missingIds}
-            filesTotal={filesTotal}
-          />
-
           <section ref={readerRef} className="scroll-mt-4">
             <h2 className="mb-2 text-sm font-semibold">
               6. 对照阅读器
