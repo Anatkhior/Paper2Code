@@ -29,6 +29,8 @@ export default function PlanList({
 }: Props) {
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  // 每张卡片的详情（引文/关键词）默认收起；展开状态记在这里
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
 
   if (!plan) {
     return (
@@ -66,82 +68,113 @@ export default function PlanList({
       </div>
 
       {/* 多列网格：创新点每条单列竖排的空间利用率太低（用户实测反馈）。
-          宽屏两列、超宽三列，铺满宽栏。 */}
-      <div className="plan-list">
+          宽屏两列、超宽三列，铺满宽栏。
+          每张卡片是"滑动窗口"：默认只展示标题+简介，引文/关键词收进
+          默认收起的详情区（内部滚动、限高）——内容长短不再把整行卡片撑到一样高。 */}
+      <div className="plan-list items-start">
       {plan.innovations.map((innovation) => {
         const difficulty = DIFFICULTY[innovation.difficulty] ?? DIFFICULTY.medium;
+        const expanded = expandedIds.has(innovation.id);
+        const evidenceCount = innovation.paper_evidence.length;
         return (
-          <label
+          <div
             key={innovation.id}
-            className={`block cursor-pointer rounded-lg border p-3 transition ${
+            className={`rounded-lg border transition ${
               selected.has(innovation.id)
                 ? "border-neutral-900 bg-neutral-50 dark:border-neutral-100 dark:bg-neutral-900"
                 : "border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950"
             }`}
           >
-            <div className="flex items-start gap-3">
-              <input
-                type="checkbox"
-                checked={selected.has(innovation.id)}
-                onChange={() => onToggle(innovation.id)}
-                className="mt-1"
-              />
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2">
-                  {editing === innovation.id ? (
-                    <input
-                      autoFocus
-                      value={draft}
-                      onChange={(event) => setDraft(event.target.value)}
-                      onBlur={() => {
-                        if (draft.trim()) onRename?.(innovation.id, draft.trim());
-                        setEditing(null);
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") event.currentTarget.blur();
-                        if (event.key === "Escape") setEditing(null);
-                      }}
-                      className="rounded border border-neutral-300 px-1 py-0.5 text-sm dark:border-neutral-700"
-                    />
-                  ) : (
-                    <span className="font-medium">{innovation.name}</span>
-                  )}
-                  {innovation.source === "user" && (
-                    <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[11px] text-blue-800 dark:bg-blue-950 dark:text-blue-200">
-                      你添加的
-                    </span>
-                  )}
-                  <span className={`rounded px-1.5 py-0.5 text-[11px] ${difficulty.className}`}>{difficulty.label}</span>
-                  <span className="font-mono text-[11px] text-neutral-400">{innovation.id}</span>
-                  {onRename && editing !== innovation.id && (
-                    <button
-                      type="button"
-                      onClick={(event) => {
-                        event.preventDefault();
-                        setDraft(innovation.name);
-                        setEditing(innovation.id);
-                      }}
-                      className="text-[11px] text-neutral-400 underline"
-                    >
-                      改名
-                    </button>
-                  )}
-                  {onDelete && (
-                    <button
-                      type="button"
-                      onClick={(event) => {
-                        event.preventDefault();
-                        onDelete(innovation.id);
-                      }}
-                      className="text-[11px] text-red-500 underline"
-                    >
-                      删除
-                    </button>
-                  )}
+            {/* 头部（整卡可点切换勾选）：复选框 + 标题行 + 一句话简介，默认全部可见 */}
+            <label className="block cursor-pointer p-3">
+              <div className="flex items-start gap-3">
+                <input
+                  type="checkbox"
+                  checked={selected.has(innovation.id)}
+                  onChange={() => onToggle(innovation.id)}
+                  className="mt-1"
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    {editing === innovation.id ? (
+                      // 改名框占满卡片内宽（w-full 换行独占一行）：原来内联在标题行里，
+                      // 长名字会把框撑出卡片边界，超出的部分被相邻卡片的背景盖住（用户实测反馈）
+                      <input
+                        autoFocus
+                        value={draft}
+                        onChange={(event) => setDraft(event.target.value)}
+                        onBlur={() => {
+                          if (draft.trim()) onRename?.(innovation.id, draft.trim());
+                          setEditing(null);
+                        }}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") event.currentTarget.blur();
+                          if (event.key === "Escape") setEditing(null);
+                        }}
+                        className="w-full rounded border border-neutral-300 px-1.5 py-0.5 text-sm dark:border-neutral-700"
+                      />
+                    ) : (
+                      <span className="font-medium">{innovation.name}</span>
+                    )}
+                    {innovation.source === "user" && (
+                      <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[11px] text-blue-800 dark:bg-blue-950 dark:text-blue-200">
+                        你添加的
+                      </span>
+                    )}
+                    <span className={`rounded px-1.5 py-0.5 text-[11px] ${difficulty.className}`}>{difficulty.label}</span>
+                    <span className="font-mono text-[11px] text-neutral-400">{innovation.id}</span>
+                    {onRename && editing !== innovation.id && (
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          setDraft(innovation.name);
+                          setEditing(innovation.id);
+                        }}
+                        className="text-[11px] text-neutral-400 underline"
+                      >
+                        改名
+                      </button>
+                    )}
+                    {onDelete && (
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          onDelete(innovation.id);
+                        }}
+                        className="text-[11px] text-red-500 underline"
+                      >
+                        删除
+                      </button>
+                    )}
+                  </div>
+                  <p className="mt-1 text-sm text-neutral-700 dark:text-neutral-300">{innovation.one_liner}</p>
                 </div>
-                <p className="mt-1 text-sm text-neutral-700 dark:text-neutral-300">{innovation.one_liner}</p>
+              </div>
+            </label>
 
-                <div className="mt-2 space-y-1">
+            {/* 详情滑动窗口：默认收起；展开后限高内部滚动，卡片高度不会因内容长短失控 */}
+            <div className="border-t border-neutral-100 px-3 py-2 dark:border-neutral-800">
+              <button
+                type="button"
+                onClick={() =>
+                  setExpandedIds((current) => {
+                    const next = new Set(current);
+                    if (next.has(innovation.id)) next.delete(innovation.id);
+                    else next.add(innovation.id);
+                    return next;
+                  })
+                }
+                aria-expanded={expanded}
+                className="text-[11px] text-neutral-500 underline"
+              >
+                {expanded ? "收起引文与关键词" : `展开引文与关键词（${evidenceCount} 条）`}
+              </button>
+              {expanded && (
+                <div className="detail-scroll mt-2 max-h-64 space-y-1 overflow-y-auto pr-1">
                   {innovation.paper_evidence.map((evidence, index) => (
                     <div key={index} className="rounded border border-neutral-200 p-2 text-xs dark:border-neutral-800">
                       <div className="flex items-center gap-2">
@@ -163,20 +196,20 @@ export default function PlanList({
                       <p className="mt-1 whitespace-pre-wrap text-neutral-700 dark:text-neutral-300">“{evidence.quote}”</p>
                     </div>
                   ))}
-                </div>
 
-                {innovation.search_hints.length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-1">
-                    {innovation.search_hints.map((hint) => (
-                      <span key={hint} className="rounded bg-neutral-100 px-1.5 py-0.5 font-mono text-[11px] text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300">
-                        {hint}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
+                  {innovation.search_hints.length > 0 && (
+                    <div className="flex flex-wrap gap-1 pt-1">
+                      {innovation.search_hints.map((hint) => (
+                        <span key={hint} className="rounded bg-neutral-100 px-1.5 py-0.5 font-mono text-[11px] text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300">
+                          {hint}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-          </label>
+          </div>
         );
       })}
 

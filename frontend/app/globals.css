@@ -42,3 +42,8 @@ body {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
+
+/* 创新点卡片的详情滑动窗口：展开时限高内部滚动（内容长也不撑爆卡片） */
+.detail-scroll {
+  scrollbar-width: thin;
+}
