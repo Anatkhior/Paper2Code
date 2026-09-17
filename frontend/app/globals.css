@@ -26,7 +26,8 @@ body {
 }
 
 
-/* 创新点勾选区：宽屏两列，别让每一条都独占一整行（空间利用率太低） */
+/* 创新点勾选区：多列网格（每条单列竖排空间利用率太低，用户实测反馈）。
+   窄屏单列；宽屏两列；超宽屏（清单区已占满宽栏）三列。 */
 .plan-list {
   display: grid;
   gap: 0.5rem;
@@ -34,5 +35,10 @@ body {
 @media (min-width: 1100px) {
   .plan-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (min-width: 1536px) {
+  .plan-list {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }

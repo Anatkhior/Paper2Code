@@ -63,8 +63,9 @@ export default function Home() {
   const [runId, setRunId] = useState<string | null>(null);
   const [paper, setPaper] = useState<PaperMeta | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
-  // 行动轨迹默认收起（它占用的是正文的空间）；用户的选择记在 localStorage 里
-  const [timelineOpen, setTimelineOpen] = useState(false);
+  // 行动轨迹：宽屏是右侧常驻长条侧栏（窄、不占正文），默认展开——
+  // 用户要求"不论在哪个步骤都能看到轨迹的实时情况"。用户的选择记在 localStorage 里
+  const [timelineOpen, setTimelineOpen] = useState(true);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -535,13 +536,13 @@ export default function Home() {
   ].filter(Boolean) as string[];
 
   return (
-    <main className="mx-auto w-full max-w-[1560px] flex-1 px-4 py-5">
-      <header className="mb-5">
-        <h1 className="text-xl font-semibold">PaperLens</h1>
-        <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
+    <main className="mx-auto w-full max-w-[1560px] flex-1 px-4 py-3">
+      <header className="mb-3">
+        <h1 className="text-lg font-semibold">PaperLens</h1>
+        <p className="mt-0.5 text-sm text-neutral-600 dark:text-neutral-400">
           上传论文 + 粘贴仓库链接 → Agent 自主探索，定位论文创新点对应的代码实现，每条引用都可机械核验。
         </p>
-        <p className="mt-1 text-xs text-neutral-500">
+        <p className="mt-0.5 text-xs text-neutral-500">
           后端 {API_BASE}：
           {backendUp === null ? "检查中…" : backendUp ? "✅ 已连接" : "❌ 连不上（先在 backend 目录跑 uvicorn）"}
           {" · "}M1 侦察 + M2 定位与核验 + M3 对照界面
@@ -635,7 +636,9 @@ export default function Home() {
             )}
             {paperReady && !runEnd && <p className="mt-2 text-[11px] text-neutral-500">论文已解析完成</p>}
           </section>
+        </div>
 
+        <div className="space-y-4">
           <section>
             <h2 className="mb-2 text-sm font-semibold">3. 创新点清单（勾选后进入阶段 B）</h2>
             <PlanList
@@ -674,9 +677,7 @@ export default function Home() {
               <strong>且绝不执行仓库里的任何代码</strong>。引用会锚定到具体 commit，之后仓库怎么变都不影响你的解读。
             </p>
           </section>
-        </div>
 
-        <div className="space-y-4">
           {/* 窄屏兜底：内联的轨迹（默认收起）。宽屏请用页面右侧的长条侧栏 */}
           <section className="xl:hidden">
             <div className="mb-2 flex items-center gap-2">
@@ -696,7 +697,6 @@ export default function Home() {
             {/* 默认收起：轨迹是"过程"不是"交付物"，不该跟正文抢地方；要看细节随时展开 */}
             <Timeline events={events} variant="inline" collapsed={!timelineOpen} />
           </section>
-
         </div>
       </div>
 
@@ -761,9 +761,9 @@ export default function Home() {
         </div>
 
         {/* 行动轨迹：整页右侧的长而窄的 sticky 侧栏。
-            为什么放这儿：它是"过程"，用户在任何步骤都该能瞄一眼最新进展，
-            但它既不该占正文的地方，也不该打断操作——所以固定宽度 + 内部自己滚动 + sticky。 */}
-        <aside className="timeline-sidebar sticky top-4 hidden h-[calc(100vh-2rem)] w-[21rem] shrink-0 xl:block">
+            为什么放这儿：用户要求"不论在哪个步骤都能看到轨迹的实时情况，但不影响正常操作"——
+            所以固定窄宽度（不占正文）+ 内部自己滚动 + sticky，跟随整页滚动始终可见。 */}
+        <aside className="timeline-sidebar sticky top-4 hidden h-[calc(100vh-2rem)] w-[16rem] shrink-0 xl:block">
           <div className="mb-2 flex items-center gap-2">
             <h2 className="text-sm font-semibold">Agent 行动轨迹（实时）</h2>
             <span className="text-[11px] text-neutral-500">

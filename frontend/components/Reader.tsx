@@ -147,15 +147,17 @@ export default function Reader({
   const pageHeight = left?.pageHeight ?? 0;
   const imageUrl = pageImageUrl && left ? pageImageUrl(left.page) : null;
   const firstRect = rects[0];
-  const highlightStyle =
-    firstRect && pageWidth > 0 && pageHeight > 0
-      ? {
-          left: `${(firstRect[0] / pageWidth) * 100}%`,
-          top: `${(firstRect[1] / pageHeight) * 100}%`,
-          width: `${((firstRect[2] - firstRect[0]) / pageWidth) * 100}%`,
-          height: `${((firstRect[3] - firstRect[1]) / pageHeight) * 100}%`,
-        }
-      : null;
+  // **每个矩形都要画**：后端把引文按行拆成多个矩形（换行一段一个），
+  // 之前只画 rects[0]，换行后的句子就丢了高亮（2026-09-17 用户实测）。
+  const highlightStyles =
+    pageWidth > 0 && pageHeight > 0
+      ? rects.map((rect) => ({
+          left: `${(rect[0] / pageWidth) * 100}%`,
+          top: `${(rect[1] / pageHeight) * 100}%`,
+          width: `${((rect[2] - rect[0]) / pageWidth) * 100}%`,
+          height: `${((rect[3] - rect[1]) / pageHeight) * 100}%`,
+        }))
+      : [];
 
   /**
    * 原版页面视图的高亮同样自动进视野：整页图通常比窗格高，只把窗口滚到阅读器还不够，
@@ -163,13 +165,13 @@ export default function Reader({
    */
   useEffect(() => {
     const box = pdfBoxRef.current;
-    if (!box || paperMode !== "pdf" || !highlightStyle || !pageHeight) return;
+    if (!box || paperMode !== "pdf" || highlightStyles.length === 0 || !pageHeight) return;
     const target = (Number(firstRect?.[1] ?? 0) / pageHeight) * box.scrollHeight;
     const timer = window.setTimeout(() => {
       box.scrollTop = Math.max(0, target - box.clientHeight / 2);
     }, 60);
     return () => window.clearTimeout(timer);
-  }, [highlightStyle, pageHeight, paperMode, firstRect, left?.page]);
+  }, [highlightStyles, pageHeight, paperMode, firstRect, left?.page]);
 
   return (
     <div className="relative">
@@ -252,11 +254,11 @@ export default function Reader({
           <div className="flex min-h-0 flex-1 flex-col bg-neutral-100 dark:bg-neutral-900">
             {left?.quote && (
               <p className="border-b border-neutral-200 bg-white px-3 py-1 text-[11px] text-neutral-500 dark:border-neutral-800 dark:bg-neutral-950">
-                {highlightStyle
+                {highlightStyles.length > 0
                   ? (left.coverage ?? 1) < 0.999
-                    ? `已高亮第 ${left.page} 页里的这段引文，但只覆盖了约 ${Math.round((left.coverage ?? 0) * 100)}%` +
+                    ? `已高亮第 ${left.page} 页里的这段引文（共 ${highlightStyles.length} 段），但只覆盖了约 ${Math.round((left.coverage ?? 0) * 100)}%` +
                       "——引文里的公式/符号在 PDF 文本层常常匹配不到，完整引文请看「原文文本」"
-                    : `已高亮第 ${left.page} 页里的这段引文（框的位置由后端从 PDF 里定位，和引用核验同一个口径）`
+                    : `已高亮第 ${left.page} 页里的这段引文（共 ${highlightStyles.length} 段，框的位置由后端从 PDF 里定位，和引用核验同一个口径）`
                   : `这一页没定位到这段引文，所以没有画高亮框——切到「原文文本」看它落在哪，或者它本来就不在这一页`}
                 {pdfUrl && (
                   <>
@@ -278,13 +280,14 @@ export default function Reader({
                     alt={`论文第 ${left.page} 页`}
                     className="block w-full rounded border border-neutral-300 bg-white dark:border-neutral-700"
                   />
-                  {highlightStyle && (
+                  {highlightStyles.map((style, index) => (
                     <span
+                      key={index}
                       className="pointer-events-none absolute rounded-[2px] bg-amber-300/40 ring-1 ring-amber-500"
-                      style={highlightStyle}
+                      style={style}
                       aria-hidden
                     />
-                  )}
+                  ))}
                 </div>
               ) : (
                 <p className="p-3 text-sm text-neutral-500">

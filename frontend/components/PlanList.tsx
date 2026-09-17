@@ -65,6 +65,8 @@ export default function PlanList({
         </button>
       </div>
 
+      {/* 多列网格：创新点每条单列竖排的空间利用率太低（用户实测反馈）。
+          宽屏两列、超宽三列，铺满宽栏。 */}
       <div className="plan-list">
       {plan.innovations.map((innovation) => {
         const difficulty = DIFFICULTY[innovation.difficulty] ?? DIFFICULTY.medium;
