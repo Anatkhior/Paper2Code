@@ -65,6 +65,7 @@ export default function PlanList({
         </button>
       </div>
 
+      <div className="plan-list">
       {plan.innovations.map((innovation) => {
         const difficulty = DIFFICULTY[innovation.difficulty] ?? DIFFICULTY.medium;
         return (
@@ -176,6 +177,8 @@ export default function PlanList({
           </label>
         );
       })}
+
+      </div>
 
       {/* 这里原本还有一个「开始定位选中项」按钮，与第 4 节「代码仓库」里的按钮重复 →
           已移除（定位需要先填仓库地址，动作应该只出现在填地址的那一节旁边）。 */}

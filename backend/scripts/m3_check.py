@@ -222,6 +222,33 @@ async def section_a(check: Checker, client: httpx.AsyncClient) -> str:
     bad_image = await client.get(f"/api/runs/{run_id}/paper/page/99/image")
     check(bad_image.status_code == 422, f"渲染越界页 → 422（HTTP {bad_image.status_code}）")
 
+    # ---- 跨行 / 连字符折行 / 公式的引文：必须覆盖折行后的部分（2026-09-17 用户反馈）----
+    hard_pdf = ROOT / "data" / f"hard-page-{int(time.time() * 1000)}.pdf"
+    hard_quote = build_hard_case_pdf(hard_pdf)
+    hard_run = (
+        await client.post(
+            "/api/runs",
+            files={"file": ("hard.pdf", hard_pdf.read_bytes(), "application/pdf")},
+            data={"provider": json.dumps(provider("mock-model"))},
+        )
+    ).json()["run_id"]
+    hard = (await client.get(f"/api/runs/{hard_run}/paper/page/1", params={"quote": hard_quote})).json()
+    hard_rects = hard.get("highlight_rects") or []
+    check(
+        len(hard_rects) >= 2,
+        f"跨行引文覆盖折行后的部分（{len(hard_rects)} 个框，覆盖 {hard.get('highlight_coverage')}）"
+        "——旧实现只高亮前半截",
+    )
+    check(
+        (hard.get("highlight_coverage") or 0) >= 0.6,
+        f"跨行 + 连字符 + 公式的引文覆盖率仍然可观（{hard.get('highlight_coverage')}）",
+    )
+    bogus = (await client.get(f"/api/runs/{hard_run}/paper/page/1", params={"quote": "definitely not on this page at all"})).json()
+    check(
+        (bogus.get("highlight_rects") or []) == [] and not (bogus.get("highlight_coverage") or 0),
+        "常见词拼出来的假引文**不画框**（几何匹配加了覆盖率与连续命中阈值，防误报）",
+    )
+
     # ---- PDF 原版（交给浏览器自带阅读器，才能看到真实排版/公式/图）----
     pdf_response = await client.get(f"/api/runs/{run_id}/pdf")
     check(pdf_response.status_code == 200, f"PDF 直链可用（HTTP {pdf_response.status_code}）")
@@ -338,12 +365,52 @@ async def section_b(check: Checker) -> None:
             "收起轨迹" not in html,
             "默认状态下按钮文案是「展开」而不是「收起」（默认收起）",
         )
+        # ⑤ 布局（2026-09-17 用户反馈：创新点单列太浪费、轨迹该常驻侧栏）
+        check(
+            "timeline-sidebar" in html and "sticky top-4" in html and "xl:block" in html,
+            "行动轨迹有常驻侧栏（sticky + 固定宽度 + 宽屏才显示）——任何步骤都能看到进展",
+        )
+        check(
+            "xl:hidden" in html,
+            "窄屏退回正文里的内联轨迹（侧栏放不下时仍能看到）",
+        )
+        # 创新点/结论的多列网格只在有数据时渲染，属于打包产物层面的断言（见 m6）
     finally:
         server.terminate()
         try:
             server.wait(timeout=15)
         except subprocess.TimeoutExpired:
             server.kill()
+
+
+def build_hard_case_pdf(dest: Path) -> str:
+    """造一页"真论文形态"的 PDF：连字符折行 + 公式 + 不换行空格。
+
+    2026-09-17 用户实测：跨行的引文只高亮了前半截。根因是"整段/整窗字符串匹配"对空白极其敏感，
+    真论文里的连字符折行、非 ASCII 空格、公式都会让它失败。这里用这一页把这个回归钉住。
+    返回这一页上那句跨行引文的**逻辑写法**（人类写法：不连字符、普通空格）。
+    """
+    import pymupdf
+
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((72, 100), "3.2 Low-Rank Reparameterization", fontsize=12)
+    body = [
+        "Low-rank reparameterization reduces the number of trainable parame-",
+        "ters by four orders of magnitude, and the update is dW = BA where",
+        "B\u00a0has shape (d, r) and A has shape (r, k); during training W0 is frozen.",
+    ]
+    y = 130
+    for line in body:
+        page.insert_text((72, y), line, fontsize=11)
+        y += 16
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(dest)
+    doc.close()
+    return (
+        "Low-rank reparameterization reduces the number of trainable parameters by four orders "
+        "of magnitude, and the update is dW = BA where B has shape (d, r) and A has shape (r, k)"
+    )
 
 
 async def main() -> int:

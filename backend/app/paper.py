@@ -41,6 +41,41 @@ def _squash(text: str) -> str:
     return re.sub(r"\s+", "", text)
 
 
+def _merge_rects(rects: list[tuple[float, float, float, float]]) -> list[tuple[float, float, float, float]]:
+    """把同一行上的碎矩形并成一段（逐词匹配会产生很多小框，画出来很碎）。
+
+    判定"同一行"：纵向重叠超过一半。合并后按读序排序、去重。
+    """
+    if not rects:
+        return []
+    ordered = sorted(rects, key=lambda item: (round(item[1], 1), item[0]))
+    merged: list[list[float]] = []
+    for x0, y0, x1, y1 in ordered:
+        target = None
+        for item in merged:
+            overlap = min(item[3], y1) - max(item[1], y0)
+            shorter = min(item[3] - item[1], y1 - y0)
+            if shorter > 0 and overlap / shorter > 0.5:
+                target = item
+                break
+        if target is None:
+            merged.append([x0, y0, x1, y1])
+        else:
+            target[0] = min(target[0], x0)
+            target[1] = min(target[1], y0)
+            target[2] = max(target[2], x1)
+            target[3] = max(target[3], y1)
+    seen: set[tuple[int, int, int, int]] = set()
+    unique: list[tuple[float, float, float, float]] = []
+    for x0, y0, x1, y1 in merged:
+        key = (round(x0), round(y0), round(x1), round(y1))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append((x0, y0, x1, y1))
+    return unique
+
+
 @dataclass(slots=True)
 class PageStats:
     page: int
@@ -129,19 +164,136 @@ class PaperDocument:
         rect = self._open()[page - 1].rect
         return float(rect.width), float(rect.height)
 
+    # -- 引文定位（几何序列匹配；字符串匹配只当快路径）-------------------------
+    @staticmethod
+    def _pick_after(candidates: list, cursor) -> object | None:
+        """在候选里挑一个"读序上紧跟在 cursor 之后"的矩形。
+
+        同一行看 x，允许跨行（行距最多按 3 行算），但距离不能太远——否则会跳到页面上
+        另一个无关的位置上去。
+        """
+        best = None
+        best_key = None
+        for rect in candidates:
+            same_line = abs(rect.y0 - cursor.y0) < 4
+            if same_line:
+                if rect.x0 < cursor.x1 - 1:
+                    continue
+                key = (0, rect.x0 - cursor.x1)
+            else:
+                gap = rect.y0 - cursor.y0
+                if not (0 < gap < 60):
+                    continue
+                key = (1, gap, rect.x0)
+            if best_key is None or key < best_key:
+                best_key, best = key, rect
+        return best
+
+    @classmethod
+    def _pick_before(cls, candidates: list, cursor) -> object | None:
+        """反方向：读序上紧挨在 cursor 之前。"""
+        best = None
+        best_key = None
+        for rect in candidates:
+            same_line = abs(rect.y0 - cursor.y0) < 4
+            if same_line:
+                if rect.x1 > cursor.x0 + 1:
+                    continue
+                key = (0, cursor.x0 - rect.x1)
+            else:
+                gap = cursor.y0 - rect.y0
+                if not (0 < gap < 60):
+                    continue
+                key = (1, gap, -rect.x0)
+            if best_key is None or key < best_key:
+                best_key, best = key, rect
+        return best
+
+    def _geometry_hits(self, pdf_page, words: list[str]) -> tuple[list[tuple[float, float, float, float]], float]:
+        """**按词的几何序列**在页面里拼出引文位置。
+
+        为什么需要它（2026-09-17 用户实测：跨行的引文只高亮了前半截）：
+        字符串匹配（`search_for(整段)` 或滑窗）对空白极其敏感——真论文里有
+        连字符折行、非 ASCII 空格、两端对齐拉伸的空格、双栏换列……任何一种都会让
+        "整段/整窗"匹配失败，于是只亮出一部分。
+        这里改成：逐词找位置，再按**读序**（同一行看 x、换行看行距）把它们串起来；
+        某个词找不到（例如公式）就跳过它继续，不因此中断整句。
+        覆盖率 = 找到的词数 / 总词数。
+        """
+        hits: list[list] = []
+        for word in words:
+            candidates = [word]
+            stripped = word.strip('.,;:()[]{}\"\'“”‘’')
+            if stripped and stripped != word and len(stripped) >= 2:
+                candidates.append(stripped)
+            # 连字符折行会把词切成两半（"parame-" / "ters"），整词搜不到 →
+            # 再试一次"词的前半段"，几何约束会保证它仍落在正确的读序位置上
+            if len(word) >= 6:
+                candidates.append(word[: max(4, len(word) // 2)])
+            found: list = []
+            for candidate in candidates:
+                if len(candidate) < 2:
+                    continue
+                found = pdf_page.search_for(candidate, flags=pymupdf.TEXT_DEHYPHENATE) or []
+                if found:
+                    break
+            hits.append(list(found))
+
+        anchors = [index for index, item in enumerate(hits) if item]
+        if not anchors:
+            return [], 0.0
+        # 锚点挑"最长且候选最少"的词：最能定位到唯一位置
+        anchor = max(anchors, key=lambda index: (len(words[index]), -len(hits[index])))
+
+        best_chosen: dict[int, object] = {}
+        for anchor_rect in hits[anchor]:
+            chosen: dict[int, object] = {anchor: anchor_rect}
+            cursor = anchor_rect
+            for index in range(anchor + 1, len(words)):
+                nxt = self._pick_after(hits[index], cursor)
+                if nxt is not None:
+                    chosen[index] = nxt
+                    cursor = nxt
+            cursor = anchor_rect
+            for index in range(anchor - 1, -1, -1):
+                prev = self._pick_before(hits[index], cursor)
+                if prev is not None:
+                    chosen[index] = prev
+                    cursor = prev
+            if len(chosen) > len(best_chosen):
+                best_chosen = chosen
+
+        if not best_chosen:
+            return [], 0.0
+
+        # 防误报：引文里全是常见词时（"definitely not in this paper" 这种），
+        # 逐词匹配能把页面上零散的同名词串起来 → 画出一堆假框。
+        # 所以要求**既要有足够覆盖率，又要有一段足够长的连续命中**。
+        ordered = sorted(best_chosen)
+        longest_run = 1
+        current_run = 1
+        for previous, current in zip(ordered, ordered[1:]):
+            current_run = current_run + 1 if current == previous + 1 else 1
+            longest_run = max(longest_run, current_run)
+        coverage = len(best_chosen) / len(words)
+        if coverage < 0.5 or longest_run < 4:
+            return [], 0.0
+
+        rects = [best_chosen[index] for index in ordered]
+        return _merge_rects(rects), round(min(1.0, coverage), 3)
+
     def quote_rects(
         self, page: int, quote: str, *, max_rects: int = 40
     ) -> tuple[list[tuple[float, float, float, float]], float]:
         """在某一页里找出引文的位置（PDF 点坐标），并给出**覆盖率**。
 
-        返回 (矩形列表, 覆盖率)。覆盖率 = 匹配到的词数 / 引文总词数。
+        返回 (矩形列表, 覆盖率)；覆盖率 = 匹配到的词数 / 引文总词数。
 
-        为什么要滑窗而不是"整段匹配、失败就退到前缀"：
-        论文引文里常混着公式/符号（比如 `(alpha/r)·BAx`），整段在 PDF 的文本层里逐字匹配不上；
-        旧实现退化成"只匹配前 5~8 个词"——于是用户看到**只高亮了引文的一小截**
-        （2026-09-16 实测反馈"公式的部分高亮的并不全面"）。
-        现在改成：整段试一次，再用 8 词窗口、步长 4 词逐窗匹配，把命中的窗口并起来，
-        覆盖率如实报出去（<1 就说明有部分没匹配上，前端会提示"切原文文本看完整引文"）。
+        两级策略：
+          ① 快路径——字符串匹配（整段 → 8 词滑窗）覆盖大多数规整引文；
+          ② 兜底——**按词的几何序列**匹配（见 `_geometry_hits`），
+             专治连字符折行、非 ASCII 空格、双栏换列、公式夹杂这类"整段串不起来"的情况。
+        取覆盖率更高的那一份；覆盖率 <1 时前端会明说"只覆盖约 N%"。
         """
         if not 1 <= page <= self.page_count:
             raise ValueError(f"页码 {page} 超出范围（这篇论文共 {self.page_count} 页）")
@@ -163,9 +315,9 @@ class PaperDocument:
         # ① 整段（允许跨连字符折行）
         whole = _hits(target, pymupdf.TEXT_DEHYPHENATE)
         if whole:
-            return whole[:max_rects], 1.0
+            return _merge_rects(whole)[:max_rects], 1.0
 
-        # ② 滑窗：命中的窗口矩形并起来，覆盖率按"命中的词"累计
+        # ② 滑窗（8 词窗口 / 步长 4）：命中的窗口并起来
         window, step = 8, 4
         matched: list[tuple[float, float, float, float]] = []
         matched_indices: set[int] = set()   # 按词下标记账：滑窗有重叠，累加长度会把覆盖率算爆
@@ -174,29 +326,22 @@ class PaperDocument:
             chunk_words = words[index : index + window]
             if len(chunk_words) < 3 and index > 0:
                 break
-            chunk = " ".join(chunk_words)
-            found = _hits(chunk)
+            found = _hits(" ".join(chunk_words))
             if found:
                 matched.extend(found)
                 matched_indices.update(range(index, index + len(chunk_words)))
             if index + window >= total_words:
                 break
             index += step
+        string_best = (matched, len(matched_indices) / total_words if total_words else 0.0)
 
-        if not matched:
-            return [], 0.0
-
-        # 去重（同一行可能被相邻窗口各匹配到一次）+ 按阅读顺序排序
-        seen: set[tuple[int, int, int, int]] = set()
-        unique: list[tuple[float, float, float, float]] = []
-        for rect in sorted(matched, key=lambda item: (round(item[1], 1), item[0])):
-            key = (round(rect[0]), round(rect[1]), round(rect[2]), round(rect[3]))
-            if key in seen:
-                continue
-            seen.add(key)
-            unique.append(rect)
-        coverage = (len(matched_indices) / total_words) if total_words else 0.0
-        return unique[:max_rects], round(coverage, 3)
+        # ③ 几何兜底：字符串法没吃满（覆盖率 <1）的时候再试，谁覆盖得多用谁
+        if string_best[1] >= 0.999:
+            return _merge_rects(matched)[:max_rects], 1.0
+        geometry_rects, geometry_coverage = self._geometry_hits(pdf_page, words)
+        if geometry_coverage > string_best[1]:
+            return geometry_rects[:max_rects], geometry_coverage
+        return _merge_rects(matched)[:max_rects], round(string_best[1], 3)
 
     def page_stats(self) -> list[PageStats]:
         stats: list[PageStats] = []

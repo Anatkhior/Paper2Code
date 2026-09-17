@@ -341,6 +341,15 @@ async def section_c(check: Checker) -> None:
             any("smoke-compact" in text for text in texts),
             "自检通过的紧凑样式进了打包产物（成功后不再摆 capabilities JSON）",
         )
+        # 布局：创新点勾选与逐条结论都用多列网格（用户反馈单列太浪费空间）
+        check(
+            any("plan-list" in text and "findings-grid" in text for text in texts),
+            "多列网格进产物：创新点勾选区（.plan-list）与逐条结论（.findings-grid）",
+        )
+        check(
+            any("xl:grid-cols-2" in text for text in texts),
+            "逐条结论在宽屏下是两列（xl:grid-cols-2）",
+        )
     finally:
         server.terminate()
         try:

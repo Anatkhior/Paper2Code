@@ -102,10 +102,13 @@ function describe(event: RunEvent): { icon: string; title: string; detail?: stri
 export default function Timeline({
   events,
   collapsed = false,
+  variant = "inline",
 }: {
   events: RunEvent[];
   /** 收起时只留一小条（仍可滚动、仍跟最新）；展开时给足高度看完整轨迹 */
   collapsed?: boolean;
+  /** inline：嵌在正文里（窄屏用）；sidebar：整页右侧的长条侧栏（宽屏用，始终可见） */
+  variant?: "inline" | "sidebar";
 }) {
   const items = toItems(events);
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -143,8 +146,14 @@ export default function Timeline({
   return (
     <div
       ref={scrollerRef}
-      className={`overflow-y-auto rounded-lg border border-neutral-200 bg-white p-3 dark:border-neutral-800 dark:bg-neutral-950 ${
-        collapsed ? "max-h-[9rem]" : "max-h-[70vh]"
+      className={`timeline-${variant} overflow-y-auto rounded-lg border border-neutral-200 bg-white p-3 dark:border-neutral-800 dark:bg-neutral-950 ${
+        variant === "sidebar"
+          ? collapsed
+            ? "h-[9rem]"
+            : "h-full"
+          : collapsed
+            ? "max-h-[9rem]"
+            : "max-h-[70vh]"
       }`}
     >
       <ol className="space-y-1.5">

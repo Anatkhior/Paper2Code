@@ -535,7 +535,7 @@ export default function Home() {
   ].filter(Boolean) as string[];
 
   return (
-    <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6">
+    <main className="mx-auto w-full max-w-[1560px] flex-1 px-4 py-5">
       <header className="mb-5">
         <h1 className="text-xl font-semibold">PaperLens</h1>
         <p className="mt-1 text-sm text-neutral-600 dark:text-neutral-400">
@@ -573,7 +573,9 @@ export default function Home() {
         </div>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-[420px_1fr]">
+      <div className="flex items-start gap-4">
+        <div className="min-w-0 flex-1 space-y-4">
+      <div className="grid gap-4 lg:grid-cols-[400px_minmax(0,1fr)]">
         <div className="space-y-4">
           <ProviderForm
             value={provider}
@@ -675,7 +677,8 @@ export default function Home() {
         </div>
 
         <div className="space-y-4">
-          <section>
+          {/* 窄屏兜底：内联的轨迹（默认收起）。宽屏请用页面右侧的长条侧栏 */}
+          <section className="xl:hidden">
             <div className="mb-2 flex items-center gap-2">
               <h2 className="text-sm font-semibold">5. Agent 行动轨迹（实时）</h2>
               <span className="text-[11px] text-neutral-500">
@@ -691,70 +694,94 @@ export default function Home() {
               </button>
             </div>
             {/* 默认收起：轨迹是"过程"不是"交付物"，不该跟正文抢地方；要看细节随时展开 */}
-            <Timeline events={events} collapsed={!timelineOpen} />
+            <Timeline events={events} variant="inline" collapsed={!timelineOpen} />
           </section>
 
         </div>
       </div>
 
-      {/* 下面是这份系统的交付物本体：论文证据 ↔ 代码引用的双栏对照 */}
-      <div className="mt-4 space-y-4">
-        <CoverageCard
-          events={events}
-          verification={verification}
-          missingIds={missingIds}
-          filesTotal={filesTotal}
-        />
-
-        <section ref={readerRef} className="scroll-mt-4">
-          <h2 className="mb-2 text-sm font-semibold">
-            6. 对照阅读器
-            <span className="ml-2 text-[11px] font-normal text-neutral-500">
-              左右各自独立滚动，被引用的部分会高亮
-            </span>
-          </h2>
-          <Reader
-            left={paperPane}
-            right={codePane}
-            pdfUrl={runId ? pdfUrl(runId) : null}
-            pageImageUrl={runId ? (page: number) => paperPageImageUrl(runId, page) : null}
-            onGoToPage={(page) => openPaper(page, paperPane?.quote ?? "")}
-            onSelectTarget={addTarget}
-          />
-        </section>
-
-        <div ref={chatRef} className="scroll-mt-4">
-          <ChatPanel
-            turns={chatTurns}
-            streaming={chatStreaming}
-            busy={chatBusy}
-            context={chatContext}
-            onClearContext={() => setChatContext(null)}
-            onSend={sendChat}
-            disabled={!runId}
-            onOpenCitation={(path, start, end) => openCode(path, start, end, "来自追问对话")}
-          />
-        </div>
-
-        <section>
-          <h2 className="mb-2 text-sm font-semibold">
-            8. 逐条结论
-            <span className="ml-2 text-[11px] font-normal text-neutral-500">
-              点任意引用，上方的对照阅读器会跳到对应位置（追问也在这里就能用）
-            </span>
-          </h2>
-          <ComparePanel
-            findings={findings}
+        {/* 下面是这份系统的交付物本体：论文证据 ↔ 代码引用的双栏对照 */}
+        <div className="mt-4 space-y-4">
+          <CoverageCard
+            events={events}
             verification={verification}
             missingIds={missingIds}
-            commitSha={commitSha}
-            busy={phase === "locate"}
-            onOpenPaper={openPaper}
-            onOpenCode={openCode}
-            onAsk={askAbout}
+            filesTotal={filesTotal}
           />
-        </section>
 
+          <section ref={readerRef} className="scroll-mt-4">
+            <h2 className="mb-2 text-sm font-semibold">
+              6. 对照阅读器
+              <span className="ml-2 text-[11px] font-normal text-neutral-500">
+                左右各自独立滚动，被引用的部分会高亮
+              </span>
+            </h2>
+            <Reader
+              left={paperPane}
+              right={codePane}
+              pdfUrl={runId ? pdfUrl(runId) : null}
+              pageImageUrl={runId ? (page: number) => paperPageImageUrl(runId, page) : null}
+              onGoToPage={(page) => openPaper(page, paperPane?.quote ?? "")}
+              onSelectTarget={addTarget}
+            />
+          </section>
+
+          <div ref={chatRef} className="scroll-mt-4">
+            <ChatPanel
+              turns={chatTurns}
+              streaming={chatStreaming}
+              busy={chatBusy}
+              context={chatContext}
+              onClearContext={() => setChatContext(null)}
+              onSend={sendChat}
+              disabled={!runId}
+              onOpenCitation={(path, start, end) => openCode(path, start, end, "来自追问对话")}
+            />
+          </div>
+
+          <section>
+            <h2 className="mb-2 text-sm font-semibold">
+              8. 逐条结论
+              <span className="ml-2 text-[11px] font-normal text-neutral-500">
+                点任意引用，上方的对照阅读器会跳到对应位置（追问也在这里就能用）
+              </span>
+            </h2>
+            <ComparePanel
+              findings={findings}
+              verification={verification}
+              missingIds={missingIds}
+              commitSha={commitSha}
+              busy={phase === "locate"}
+              onOpenPaper={openPaper}
+              onOpenCode={openCode}
+              onAsk={askAbout}
+            />
+        </section>
+          </div>
+        </div>
+
+        {/* 行动轨迹：整页右侧的长而窄的 sticky 侧栏。
+            为什么放这儿：它是"过程"，用户在任何步骤都该能瞄一眼最新进展，
+            但它既不该占正文的地方，也不该打断操作——所以固定宽度 + 内部自己滚动 + sticky。 */}
+        <aside className="timeline-sidebar sticky top-4 hidden h-[calc(100vh-2rem)] w-[21rem] shrink-0 xl:block">
+          <div className="mb-2 flex items-center gap-2">
+            <h2 className="text-sm font-semibold">Agent 行动轨迹（实时）</h2>
+            <span className="text-[11px] text-neutral-500">
+              {events.length > 0 ? `共 ${events.length} 条` : "还没开始"}
+            </span>
+            <button
+              type="button"
+              onClick={toggleTimeline}
+              aria-expanded={timelineOpen}
+              className="ml-auto rounded border border-neutral-300 px-2 py-0.5 text-[11px] text-neutral-600 hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
+            >
+              {timelineOpen ? "收起" : "展开"}
+            </button>
+          </div>
+          <div className="h-[calc(100%-2rem)]">
+            <Timeline events={events} variant="sidebar" collapsed={!timelineOpen} />
+          </div>
+        </aside>
       </div>
     </main>
   );

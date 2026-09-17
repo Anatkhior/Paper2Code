@@ -78,6 +78,7 @@ export default function ComparePanel({
         </div>
       )}
 
+      <div className="findings-grid grid items-start gap-3 xl:grid-cols-2">
       {findings.map((finding) => (
         <article
           key={finding.id}
@@ -269,6 +270,7 @@ export default function ComparePanel({
           </footer>
         </article>
       ))}
+      </div>
     </div>
   );
 }
