@@ -5,7 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ChatPanel, { type ChatTurn } from "@/components/ChatPanel";
 import ComparePanel from "@/components/ComparePanel";
 import CoverageCard from "@/components/CoverageCard";
-import PlanList from "@/components/PlanList";
+import PlanList, { PlanDetail } from "@/components/PlanList";
 import ProviderForm from "@/components/ProviderForm";
 import Reader, { type CodePane, type PaperPane } from "@/components/Reader";
 import Timeline from "@/components/Timeline";
@@ -51,6 +51,15 @@ const EMPTY_PROVIDER: ProviderConfig = {
 type Phase = "idle" | "uploading" | "recon" | "locate" | "done" | "error";
 
 export default function Home() {
+  const [chatTurns, setChatTurns] = useState<ChatTurn[]>([]);
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatContext, setChatContext] = useState<{ id: string; name: string } | null>(null);
+  const chatRef = useRef<HTMLDivElement>(null);
+
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const [plan, setPlan] = useState<Plan | null>(null);
+
   const [provider, setProvider] = useState<ProviderConfig>(EMPTY_PROVIDER);
   const [rememberKey, setRememberKey] = useState(false);
   const [smoke, setSmoke] = useState<SmokeResult | null>(null);
@@ -90,19 +99,43 @@ export default function Home() {
   const [paperPane, setPaperPane] = useState<PaperPane | null>(null);
   const [codePane, setCodePane] = useState<CodePane | null>(null);
   const readerRef = useRef<HTMLDivElement>(null);
+  const [setupOpen, setSetupOpen] = useState(true);
+  const [readerOpen, setReaderOpen] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [activeId, setActiveId] = useState("");
+  const activeInnovation = plan?.innovations.find((item) => item.id === activeId) ?? plan?.innovations[0];
+  const paperRequest = useRef(0);
+  const codeRequest = useRef(0);
+
+  const clearReader = useCallback(() => {
+    paperRequest.current += 1;
+    codeRequest.current += 1;
+    setPaperPane(null);
+    setCodePane(null);
+    setReaderOpen(false);
+  }, []);
+
+  const activateInnovation = (id: string) => {
+    if (id === activeInnovation?.id) return;
+    setActiveId(id);
+    clearReader();
+  };
 
   const scrollToReader = useCallback(() => {
-    readerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    setReaderOpen(true);
+    requestAnimationFrame(() => readerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
   }, []);
 
   const openPaper = useCallback(
     async (page: number, quote: string) => {
       if (!runId) return;
+      const request = ++paperRequest.current;
       setPaperPane({ page, quote, loading: true, error: null });
       scrollToReader();
       try {
         // 带上引文：后端会返回"引文在这一页上的高亮矩形"，原版页面据此叠高亮框
         const view = await fetchPaperPage(runId, page, quote);
+        if (request !== paperRequest.current) return;
         setPaperPane({
           page,
           quote,
@@ -116,7 +149,7 @@ export default function Home() {
           error: null,
         });
       } catch (caught) {
-        setPaperPane({ page, quote, loading: false, error: String(caught) });
+        if (request === paperRequest.current) setPaperPane({ page, quote, loading: false, error: String(caught) });
       }
     },
     [runId, scrollToReader],
@@ -125,10 +158,12 @@ export default function Home() {
   const openCode = useCallback(
     async (path: string, start: number, end: number, why: string) => {
       if (!runId) return;
+      const request = ++codeRequest.current;
       setCodePane({ path, start, end, why, lines: [], loading: true, error: null });
       scrollToReader();
       try {
         const view = await fetchFile(runId, path, start, end);
+        if (request !== codeRequest.current) return;
         setCodePane({
           path: view.path,
           start: view.line_start,
@@ -142,7 +177,7 @@ export default function Home() {
           error: null,
         });
       } catch (caught) {
-        setCodePane({ path, start, end, why, lines: [], loading: false, error: String(caught) });
+        if (request === codeRequest.current) setCodePane({ path, start, end, why, lines: [], loading: false, error: String(caught) });
       }
     },
     [runId, scrollToReader],
@@ -211,19 +246,23 @@ export default function Home() {
     } finally {
       setSmokeBusy(false);
     }
-  }, [provider]);
+  }, [provider, reportError]);
 
   const handleStart = useCallback(async () => {
     if (!file) {
-      setError("还没选论文 —— 在第 2 节「论文 PDF」里选一个文件");
+      setError("还没选论文 —— 在「论文 PDF」中选一个文件");
       return;
     }
     if (!provider.api_key || !provider.model) {
-      setError("还没配好模型 —— 在第 1 节填 api_key 和模型名（建议先点「运行自检」）");
+      setError("还没配好模型 —— 在「模型设置」中填 api_key 和模型名（建议先点「运行自检」）");
       return;
     }
     setError(null);
     setEvents([]);
+    eventsRef.current = [];
+    clearReader();
+    setActiveId("");
+    setChatOpen(false);
     setSelected(new Set());
     autoSelectedRef.current = false;
     setPlan(null);
@@ -237,6 +276,7 @@ export default function Home() {
       const created = await createRun(file, provider);
       setRunId(created.run_id);
       setPaper(created.paper);
+      setSetupOpen(false);
       openStream(created.run_id);
       setPhase("recon");
       await startRecon(created.run_id, provider);
@@ -244,20 +284,20 @@ export default function Home() {
       setError(String(caught));
       setPhase("error");
     }
-  }, [file, provider, openStream]);
+  }, [file, provider, openStream, clearReader]);
 
   const handleLocate = useCallback(async () => {
     if (!runId) {
-      setError("还没有可定位的目标：先上传论文跑一次侦察，或者在左边原文里划选一段自己加一个目标");
+      setError("还没有可定位的目标：先上传论文跑一次侦察，或者在原文文本里划选一段自己加一个目标");
       return;
     }
     if (selected.size === 0) {
-      setError("还没勾选任何目标 —— 在第 3 节「创新点清单」里勾上要定位的条目");
+      setError("还没勾选任何目标 —— 在「创新点目录」中勾上要定位的条目");
       return;
     }
     if (!repoUrl.trim()) {
       setError(
-        "还没填代码仓库地址 —— 在第 4 节「代码仓库」里填。" +
+        "还没填代码仓库地址 —— 在「代码仓库」中填。" +
           "本地演示可以填 backend/tests/fixtures/sample_repo 的**绝对路径**" +
           "（需要后端带 PAPERLENS_ALLOW_LOCAL_REPO_PATHS=true 启动）",
       );
@@ -286,7 +326,6 @@ export default function Home() {
 
   // 清单以**服务器为准**：用户自己加的目标只存在于服务端的 plan.json 里，
   // 光靠事件回放会把它丢掉（刷新页面就会丢）。所以事件到了之后再去拉一次真清单。
-  const [plan, setPlan] = useState<Plan | null>(null);
   useEffect(() => {
     if (!runId) return;
     let cancelled = false;
@@ -304,17 +343,10 @@ export default function Home() {
     };
   }, [planFromEvent, runId]);
 
-  const [notice, setNotice] = useState<string | null>(null);
-
   // ---- 追问对话 ----
-  const [chatTurns, setChatTurns] = useState<ChatTurn[]>([]);
-  const [chatBusy, setChatBusy] = useState(false);
-  const [chatContext, setChatContext] = useState<{ id: string; name: string } | null>(null);
-  const chatRef = useRef<HTMLDivElement>(null);
-
   useEffect(() => {
     try {
-      setTimelineOpen(window.localStorage.getItem("paperlens.timelineOpen") === "1");
+      setTimelineOpen(window.localStorage.getItem("paperlens.timelineOpen") !== "0");
     } catch {
       /* 隐私模式下拿不到 localStorage 也无所谓 */
     }
@@ -409,7 +441,8 @@ export default function Home() {
 
   const askAbout = useCallback((id: string, name: string) => {
     setChatContext({ id, name });
-    chatRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    setChatOpen(true);
+    requestAnimationFrame(() => chatRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
   }, []);
 
   /** 在原文里划选一段 → 变成一个定位目标 */
@@ -453,6 +486,10 @@ export default function Home() {
       try {
         const payload = await deletePlanItem(runId, itemId);
         setPlan(payload.plan);
+        if (activeInnovation?.id === itemId) {
+          setActiveId("");
+          clearReader();
+        }
         setSelected((current) => {
           const next = new Set(current);
           next.delete(itemId);
@@ -462,7 +499,7 @@ export default function Home() {
         setError(String(caught));
       }
     },
-    [runId],
+    [runId, activeInnovation?.id, clearReader],
   );
 
   useEffect(() => {
@@ -478,8 +515,13 @@ export default function Home() {
   }, [plan]);
 
   const findings = useMemo<Finding[]>(
-    () => events.filter((event) => event.type === "finding").map((event) => event.data.finding as Finding),
-    [events],
+    () => Array.from(new Map(events
+      .filter((event) => event.type === "finding")
+      .map((event) => {
+        const finding = event.data.finding as Finding;
+        return [finding.id, finding] as const;
+      })).values()).filter((finding) => plan?.innovations.some((item) => item.id === finding.id)),
+    [events, plan],
   );
   const verification = useMemo<VerificationSummary | null>(() => {
     const done = [...events].reverse().find((event) => event.type === "verification_done");
@@ -490,15 +532,15 @@ export default function Home() {
     return (done?.data.missing_ids as string[]) ?? [];
   }, [events]);
   const filesTotal = useMemo<number | null>(() => {
-    const ready = events.find((event) => event.type === "repo_ready");
+    const ready = [...events].reverse().find((event) => event.type === "repo_ready");
     return (ready?.data.repo?.files_total as number) ?? null;
   }, [events]);
   const commitSha = useMemo<string | null>(() => {
-    const ready = events.find((event) => event.type === "repo_ready");
+    const ready = [...events].reverse().find((event) => event.type === "repo_ready");
     return (ready?.data.repo?.commit_sha as string) ?? null;
   }, [events]);
 
-  const runEnd = useMemo(() => events.find((event) => event.type === "run_end")?.data, [events]);
+  const runEnd = useMemo(() => [...events].reverse().find((event) => event.type === "run_end")?.data, [events]);
   const paperReady = useMemo(
     () => events.find((event) => event.type === "paper_ready")?.data.paper as PaperMeta | undefined,
     [events],
@@ -514,7 +556,7 @@ export default function Home() {
 
   const toggleAll = () =>
     setSelected((current) =>
-      plan && current.size === plan.innovations.length
+      plan && plan.innovations.every((item) => current.has(item.id))
         ? new Set()
         : new Set(plan?.innovations.map((item) => item.id) ?? []),
     );
@@ -524,265 +566,131 @@ export default function Home() {
   // "点了没反应"的根治办法：把还缺什么直接写在按钮旁边
   const reconBlockers = [
     !file && "先选一篇 PDF",
-    !provider.api_key && "在第 1 节填 api_key",
-    !provider.model && "在第 1 节填模型名",
+    !provider.api_key && "在「模型设置」中填 api_key",
+    !provider.model && "在「模型设置」中填模型名",
   ].filter(Boolean) as string[];
 
   const locateBlockers = [
     !runId && "先上传论文并跑一次侦察（或先自己加一个目标）",
     selected.size === 0 && "先勾选至少一条要定位的目标",
-    !repoUrl.trim() && "在第 4 节填代码仓库地址",
-    !provider.api_key && "在第 1 节填 api_key",
+    !repoUrl.trim() && "在「代码仓库」中填代码仓库地址",
+    !provider.api_key && "在「模型设置」中填 api_key",
   ].filter(Boolean) as string[];
 
+  const activeFinding = findings.find((finding) => finding.id === activeInnovation?.id);
+  const phaseLabel = { idle: "准备论文与仓库", uploading: "正在上传论文", recon: "正在侦察论文", locate: "正在定位代码", done: "本轮已结束", error: "运行出错" }[phase];
+
   return (
-    <main className="mx-auto w-full max-w-[1560px] flex-1 px-4 py-3">
-      <header className="mb-3">
-        <h1 className="text-lg font-semibold">PaperLens</h1>
-        <p className="mt-0.5 text-sm text-neutral-600 dark:text-neutral-400">
-          上传论文 + 粘贴仓库链接 → Agent 自主探索，定位论文创新点对应的代码实现，每条引用都可机械核验。
-        </p>
-        <p className="mt-0.5 text-xs text-neutral-500">
-          后端 {API_BASE}：
-          {backendUp === null ? "检查中…" : backendUp ? "✅ 已连接" : "❌ 连不上（先在 backend 目录跑 uvicorn）"}
-          {" · "}M1 侦察 + M2 定位与核验 + M3 对照界面
-        </p>
+    <main className="mx-auto w-full max-w-[1560px] flex-1 px-4 py-4 sm:px-6">
+      <header className="mb-5 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight">PaperLens <span className="ml-2 text-xs font-normal text-neutral-500">论文与代码，一起读懂</span></h1>
+          <p className="mt-1 text-xs text-neutral-500">从核心创新点出发，阅读解释，回到原文与实现。</p>
+        </div>
+        <span className="text-xs text-neutral-500" title={`后端 ${API_BASE}`}>{backendUp === null ? "连接检查中…" : backendUp ? "● 服务已连接" : "服务未连接，请启动后端"}</span>
       </header>
 
-      {/* sticky：反馈必须出现在用户正在看的地方。
-          之前它渲染在页面顶部，用户在第 3/4 节点按钮时提示在屏幕外，
-          表现成"点了没反应"——这类静默失败比报错还糟。 */}
-      {error && (
-        <div className="sticky top-2 z-50 mb-4 flex items-start gap-2 rounded border border-red-300 bg-red-50 p-3 text-sm shadow-lg dark:border-red-900 dark:bg-red-950 dark:text-red-100">
-          <span className="flex-1">{error}</span>
-          <button
-            type="button"
-            onClick={() => setError(null)}
-            className="shrink-0 text-xs underline"
-          >
-            关闭
-          </button>
-        </div>
-      )}
+      {error && <div role="alert" className="sticky top-2 z-50 mb-4 flex items-start gap-2 rounded-lg border border-red-300 bg-red-50 p-3 text-sm shadow-lg dark:border-red-900 dark:bg-red-950 dark:text-red-100">
+        <span className="min-w-0 flex-1 break-words">{error}</span>
+        <button type="button" onClick={() => setError(null)} className="shrink-0 text-xs underline">关闭</button>
+      </div>}
+      {notice && <div role="status" className="sticky top-2 z-40 mb-4 flex items-start gap-2 rounded-lg border border-blue-300 bg-blue-50 p-3 text-sm dark:border-blue-900 dark:bg-blue-950 dark:text-blue-100">
+        <span className="min-w-0 flex-1">{notice}</span>
+        <button type="button" onClick={() => setNotice(null)} className="shrink-0 text-xs underline">知道了</button>
+      </div>}
 
-      {notice && (
-        <div className="sticky top-2 z-40 mb-4 flex items-start gap-2 rounded border border-blue-300 bg-blue-50 p-3 text-sm shadow-lg dark:border-blue-900 dark:bg-blue-950 dark:text-blue-100">
-          <span className="flex-1">{notice}</span>
-          <button type="button" onClick={() => setNotice(null)} className="text-xs underline">
-            知道了
-          </button>
-        </div>
-      )}
-
-      <div className="flex items-start gap-4">
-        <div className="min-w-0 flex-1 space-y-4">
-      <div className="grid gap-4 lg:grid-cols-[400px_minmax(0,1fr)]">
-        <div className="space-y-4">
-          <ProviderForm
-            value={provider}
-            onChange={setProvider}
-            smoke={smoke}
-            smokeBusy={smokeBusy}
-            onSmoke={handleSmoke}
-            onSave={saveProvider}
-          />
-
-          <label className="flex items-center gap-2 text-xs text-neutral-500">
-            <input
-              type="checkbox"
-              checked={rememberKey}
-              onChange={(event) => setRememberKey(event.target.checked)}
-            />
-            把 api_key 存在这个浏览器里（默认不存；存了就等于交给 localStorage）
-          </label>
-
-          <section className="rounded-lg border border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-950">
-            <h2 className="mb-3 text-sm font-semibold">2. 论文 PDF</h2>
-            <input
-              type="file"
-              accept="application/pdf"
-              onChange={(event) => setFile(event.target.files?.[0] ?? null)}
-              className="block w-full text-xs file:mr-3 file:rounded file:border-0 file:bg-neutral-100 file:px-3 file:py-1.5 file:text-xs dark:file:bg-neutral-800"
-            />
-            {paper && (
-              <p className="mt-2 text-xs text-neutral-500">
-                {paper.filename} · {paper.page_count} 页 · sha256 {paper.sha256.slice(0, 12)}…
-              </p>
-            )}
-            <button
-              type="button"
-              onClick={handleStart}
-              disabled={busy}
-              className="mt-3 w-full rounded bg-neutral-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-40 dark:bg-neutral-100 dark:text-neutral-900"
-            >
-              {phase === "uploading"
-                ? "上传中…"
-                : phase === "recon"
-                  ? "侦察中…（Agent 正在读论文）"
-                  : "上传并开始侦察（阶段 A）"}
-            </button>
-            {reconBlockers.length > 0 && (
-              <p className="mt-2 text-[11px] text-amber-600">还差：{reconBlockers.join("、")}</p>
-            )}
-            <p className="mt-2 text-[11px] leading-relaxed text-neutral-500">
-              阶段 A 只读论文、不碰代码。它会产出 3-5 条核心创新点，每条都带页码和原文引用——
-              <strong>引用会被后端逐条核验是否真的在那一页</strong>，编的会被打回去重做。
-            </p>
-            {runEnd && (
-              <p className="mt-2 font-mono text-[11px] text-neutral-500">
-                run_id {runId} · {runEnd.status} · {runEnd.stopped_reason} · 工具调用{" "}
-                {runEnd.usage?.tool_calls} 次 · {runEnd.usage?.seconds}s
-              </p>
-            )}
-            {paperReady && !runEnd && <p className="mt-2 text-[11px] text-neutral-500">论文已解析完成</p>}
-          </section>
-
-          <section className="rounded-lg border border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-950">
-            <h2 className="mb-3 text-sm font-semibold">4. 代码仓库（阶段 B）</h2>
-            <input
-              value={repoUrl}
-              onChange={(event) => setRepoUrl(event.target.value)}
-              placeholder="https://github.com/owner/repo"
-              className="w-full rounded border border-neutral-300 bg-transparent px-2 py-1 font-mono text-xs dark:border-neutral-700"
-            />
-            <button
-              type="button"
-              onClick={handleLocate}
-              disabled={locateBusy}
-              className="mt-3 w-full rounded bg-neutral-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-40 dark:bg-neutral-100 dark:text-neutral-900"
-            >
-              {phase === "locate"
-                ? "定位中…（Agent 正在仓库里探索）"
-                : `开始定位选中的 ${selected.size} 条（阶段 B）`}
-            </button>
-            {locateBlockers.length > 0 && (
-              <p className="mt-2 text-[11px] text-amber-600">还差：{locateBlockers.join("、")}</p>
-            )}
-            <p className="mt-2 text-[11px] leading-relaxed text-neutral-500">
-              只允许 https 的 github.com / gitlab.com 地址；会做浅克隆并跳过依赖目录，
-              <strong>且绝不执行仓库里的任何代码</strong>。引用会锚定到具体 commit，之后仓库怎么变都不影响你的解读。
-            </p>
-          </section>
-
-          {/* 覆盖率与预算放在仓库下面：读了多少/花了多少/核验率，跟"开始定位"是同一条操作线，
-              也补齐左栏高度让两侧平衡（宽屏六列数字网格在 400px 栏里自动收窄）。 */}
-          <CoverageCard
-            events={events}
-            verification={verification}
-            missingIds={missingIds}
-            filesTotal={filesTotal}
-          />
-
-          {/* 窄屏兜底：内联的轨迹（默认收起）。宽屏请用页面右侧的长条侧栏 */}
-          <section className="xl:hidden">
-            <div className="mb-2 flex items-center gap-2">
-              <h2 className="text-sm font-semibold">5. Agent 行动轨迹（实时）</h2>
-              <span className="text-[11px] text-neutral-500">
-                {events.length > 0 ? `共 ${events.length} 条事件` : "还没开始"}
-              </span>
-              <button
-                type="button"
-                onClick={toggleTimeline}
-                aria-expanded={timelineOpen}
-                className="ml-auto rounded border border-neutral-300 px-2 py-0.5 text-[11px] text-neutral-600 hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
-              >
-                {timelineOpen ? "收起轨迹" : "展开详细轨迹"}
-              </button>
-            </div>
-            {/* 默认收起：轨迹是"过程"不是"交付物"，不该跟正文抢地方；要看细节随时展开 */}
-            <Timeline events={events} variant="inline" collapsed={!timelineOpen} />
-          </section>
-        </div>
-
-        <div className="space-y-4">
-          <section>
-            <h2 className="mb-2 text-sm font-semibold">3. 创新点清单（勾选后进入阶段 B）</h2>
-            <PlanList
-              plan={plan}
-              selected={selected}
-              onToggle={toggle}
-              onSelectAll={toggleAll}
-              onRename={renameTarget}
-              onDelete={removeTarget}
-            />
-          </section>
-        </div>
+      <div className="run-status sticky top-0 z-30 mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-neutral-200 bg-white/95 px-4 py-3 backdrop-blur dark:border-neutral-800 dark:bg-neutral-950/95">
+        <span className={`h-2 w-2 rounded-full ${busy ? "animate-pulse bg-teal-500" : phase === "error" ? "bg-red-500" : "bg-neutral-400"}`} />
+        <span role="status" className="text-sm font-medium">{phaseLabel}</span>
+        {plan && <span className="text-xs text-neutral-500">{plan.innovations.length} 条创新点 · {findings.length} 条结论</span>}
+        <button type="button" onClick={toggleTimeline} aria-expanded={timelineOpen} aria-controls="run-timeline run-timeline-sidebar" className="ml-auto text-xs text-neutral-500">{timelineOpen ? "收起轨迹" : "展开行动轨迹"} · {events.length}</button>
       </div>
 
-        {/* 下面是这份系统的交付物本体：论文证据 ↔ 代码引用的双栏对照 */}
-        <div className="mt-4 space-y-4">
-          <section ref={readerRef} className="scroll-mt-4">
-            <h2 className="mb-2 text-sm font-semibold">
-              6. 对照阅读器
-              <span className="ml-2 text-[11px] font-normal text-neutral-500">
-                左右各自独立滚动，被引用的部分会高亮
-              </span>
-            </h2>
-            <Reader
-              left={paperPane}
-              right={codePane}
-              pdfUrl={runId ? pdfUrl(runId) : null}
-              pageImageUrl={runId ? (page: number) => paperPageImageUrl(runId, page) : null}
-              onGoToPage={(page) => openPaper(page, paperPane?.quote ?? "")}
-              onSelectTarget={addTarget}
-            />
+      <div className="flex items-start gap-5">
+        <div className="min-w-0 flex-1 space-y-4">
+          <section className="setup-panel rounded-xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950">
+            <button type="button" onClick={() => setSetupOpen(!setupOpen)} aria-expanded={setupOpen} aria-controls="analysis-setup" className="flex w-full flex-wrap items-center gap-2 px-4 py-3 text-left">
+              <span className="text-sm font-semibold">分析准备</span>
+              <span className="min-w-0 flex-1 truncate text-xs text-neutral-500">{paper ? `${paper.filename} · ${paper.page_count} 页` : "选择模型、上传论文"}{provider.model ? ` · ${provider.model}` : ""}</span>
+              <span className="text-xs text-teal-700 dark:text-teal-300">{setupOpen ? "收起 ↑" : "修改设置 / 更换论文 ↓"}</span>
+            </button>
+            <div id="analysis-setup" hidden={!setupOpen} className="border-t border-neutral-200 p-4 dark:border-neutral-800">
+              <div className="grid items-start gap-5 md:grid-cols-2">
+                <div className="min-w-0">
+                  <ProviderForm value={provider} onChange={setProvider} smoke={smoke} smokeBusy={smokeBusy} onSmoke={handleSmoke} onSave={saveProvider} />
+                  <label className="mt-3 flex items-start gap-2 text-xs text-neutral-500"><input type="checkbox" checked={rememberKey} onChange={(event) => setRememberKey(event.target.checked)} />把 api_key 存在这个浏览器里（默认不存；存了就等于交给 localStorage）</label>
+                </div>
+                <section className="min-w-0">
+                  <h2 className="mb-3 text-sm font-semibold">论文 PDF</h2>
+                  <input type="file" aria-label="论文 PDF" accept="application/pdf" onChange={(event) => setFile(event.target.files?.[0] ?? null)} className="block w-full text-xs file:mr-3 file:rounded file:border-0 file:bg-neutral-100 file:px-3 file:py-2 dark:file:bg-neutral-800" />
+                  {paper && <p className="mt-2 break-words text-xs text-neutral-500">{paper.filename} · {paper.page_count} 页</p>}
+                  <button type="button" onClick={handleStart} disabled={busy} className="primary-button mt-4 w-full">{phase === "uploading" ? "上传中…" : phase === "recon" ? "正在侦察论文…" : "上传并开始侦察"}</button>
+                  {reconBlockers.length > 0 && <p className="mt-2 text-xs text-amber-700 dark:text-amber-400">还差：{reconBlockers.join("、")}</p>}
+                  <p className="mt-3 text-xs leading-6 text-neutral-500">先梳理论文的核心创新点，再选择要定位的实现。每条论文引用都会核对页码与原文。</p>
+                  {paperReady && !runEnd && <p className="mt-2 text-xs text-neutral-500">论文已解析完成</p>}
+                </section>
+              </div>
+            </div>
           </section>
 
-          <div ref={chatRef} className="scroll-mt-4">
-            <ChatPanel
-              turns={chatTurns}
-              streaming={chatStreaming}
-              busy={chatBusy}
-              context={chatContext}
-              onClearContext={() => setChatContext(null)}
-              onSend={sendChat}
-              disabled={!runId}
-              onOpenCitation={(path, start, end) => openCode(path, start, end, "来自追问对话")}
-            />
+          <section className="rounded-xl border border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-950">
+            <label htmlFor="repository" className="mb-2 block text-sm font-semibold">代码仓库</label>
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <input id="repository" value={repoUrl} onChange={(event) => setRepoUrl(event.target.value)} placeholder="https://github.com/owner/repo" className="min-w-0 flex-1 rounded-lg border border-neutral-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-neutral-700" />
+              <button type="button" onClick={handleLocate} disabled={busy || locateBusy} className="primary-button shrink-0">{phase === "locate" ? "正在定位…" : `开始定位选中的 ${selected.size} 条`}</button>
+            </div>
+            {locateBlockers.length > 0 && <p className="mt-2 text-xs text-amber-700 dark:text-amber-400">还差：{locateBlockers.join("、")}</p>}
+          </section>
+
+          <div id="run-timeline" className="xl:hidden" hidden={!timelineOpen}><Timeline events={events} variant="inline" /></div>
+
+          <section className="innovation-workspace rounded-xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950" aria-label="创新点阅读区">
+            <header className="flex flex-wrap items-center gap-3 border-b border-neutral-200 px-5 py-4 dark:border-neutral-800">
+              <h2 className="text-sm font-semibold">核心创新点 {plan && <span className="ml-1 font-normal text-neutral-500">{plan.innovations.length} 条</span>}</h2>
+              <div className="ml-auto flex gap-4 text-xs text-teal-700 dark:text-teal-300">
+                {runId && <button type="button" onClick={() => openPaper(1, "")}>浏览论文 / 划选目标 ↗</button>}
+                {runId && <button type="button" onClick={() => { setChatOpen(true); requestAnimationFrame(() => chatRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })); }}>追问 ↗</button>}
+              </div>
+            </header>
+            {plan ? <>
+              <details className="paper-summary border-b border-neutral-200 px-5 py-3 text-sm dark:border-neutral-800">
+                <summary className="text-xs text-neutral-500">论文摘要与覆盖说明</summary>
+                <p className="mt-3 whitespace-pre-wrap leading-7">{plan.paper_summary}</p>
+                {plan.coverage_note && <p className="mt-2 text-xs text-neutral-500">覆盖说明：{plan.coverage_note}</p>}
+              </details>
+              <div className="innovation-layout">
+                <PlanList key={runId} plan={plan} selected={selected} activeId={activeInnovation?.id ?? ""} findings={findings} missingIds={missingIds} busy={busy} onActivate={activateInnovation} onToggle={toggle} onSelectAll={toggleAll} />
+                {activeInnovation && <div id="innovation-detail" role="tabpanel" aria-labelledby={`innovation-tab-${activeInnovation.id}`} tabIndex={0} className="innovation-detail">
+                  <PlanDetail key={activeInnovation.id} active={activeInnovation} hasFinding={Boolean(activeFinding)} onRename={renameTarget} onDelete={removeTarget} onOpenPaper={openPaper} />
+                  <ComparePanel key={`finding-${activeInnovation.id}`} finding={activeFinding} missing={missingIds.includes(activeInnovation.id)} busy={phase === "locate"} selected={selected.has(activeInnovation.id)} onOpenPaper={openPaper} onOpenCode={openCode} onAsk={askAbout} />
+                </div>}
+              </div>
+            </> : <p className="px-5 py-8 text-sm text-neutral-500">{busy ? "正在阅读论文，创新点清单将在这里出现。" : "上传论文并开始侦察，在这里逐条阅读创新点及对应实现。"}</p>}
+          </section>
+
+          <section ref={readerRef} hidden={!readerOpen} className="scroll-mt-20" aria-label="对照阅读器">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <h2 className="text-sm font-semibold">对照阅读器 <span className="ml-2 text-xs font-normal text-neutral-500">原文与代码按引用打开</span></h2>
+              <button type="button" onClick={() => setReaderOpen(false)} className="text-xs text-neutral-500">收起阅读器 ↑</button>
+            </div>
+            {readerOpen && <Reader left={paperPane} right={codePane} pdfUrl={runId ? pdfUrl(runId) : null} pageImageUrl={runId ? (page: number) => paperPageImageUrl(runId, page) : null} onGoToPage={(page) => openPaper(page, "")} onSelectTarget={addTarget} />}
+          </section>
+
+          <div ref={chatRef} hidden={!chatOpen} className="scroll-mt-20">
+            <button type="button" onClick={() => setChatOpen(false)} className="mb-2 text-xs text-neutral-500">收起追问 ↑</button>
+            <ChatPanel turns={chatTurns} streaming={chatStreaming} busy={chatBusy} context={chatContext} onClearContext={() => setChatContext(null)} onSend={sendChat} disabled={!runId || busy} onOpenCitation={(path, start, end) => openCode(path, start, end, "来自追问对话")} />
           </div>
 
-          <section>
-            <h2 className="mb-2 text-sm font-semibold">
-              8. 逐条结论
-              <span className="ml-2 text-[11px] font-normal text-neutral-500">
-                点任意引用，上方的对照阅读器会跳到对应位置（追问也在这里就能用）
-              </span>
-            </h2>
-            <ComparePanel
-              findings={findings}
-              verification={verification}
-              missingIds={missingIds}
-              commitSha={commitSha}
-              busy={phase === "locate"}
-              onOpenPaper={openPaper}
-              onOpenCode={openCode}
-              onAsk={askAbout}
-            />
-        </section>
-          </div>
+          {runEnd && <details className="rounded-lg border border-neutral-200 dark:border-neutral-800">
+            <summary className="px-4 py-3 text-xs text-neutral-500">覆盖率与预算{verification ? ` · 引用核验率 ${(verification.citation_verifiable_rate * 100).toFixed(0)}% · ${verification.citations_verified}/${verification.citations_total} 条` : ""}{missingIds.length ? ` · ${missingIds.length} 条未产出结论` : ""}</summary>
+            <CoverageCard events={events} verification={verification} missingIds={missingIds} filesTotal={filesTotal} />
+            {commitSha && <p className="break-all px-4 pb-3 font-mono text-[11px] text-neutral-500">commit {commitSha}</p>}
+          </details>}
         </div>
 
-        {/* 行动轨迹：整页右侧的长而窄的 sticky 侧栏。
-            为什么放这儿：用户要求"不论在哪个步骤都能看到轨迹的实时情况，但不影响正常操作"——
-            所以固定窄宽度（不占正文）+ 内部自己滚动 + sticky，跟随整页滚动始终可见。 */}
-        <aside className="timeline-sidebar sticky top-4 hidden h-[calc(100vh-2rem)] w-[16rem] shrink-0 xl:block">
-          <div className="mb-2 flex items-center gap-2">
-            <h2 className="text-sm font-semibold">Agent 行动轨迹（实时）</h2>
-            <span className="text-[11px] text-neutral-500">
-              {events.length > 0 ? `共 ${events.length} 条` : "还没开始"}
-            </span>
-            <button
-              type="button"
-              onClick={toggleTimeline}
-              aria-expanded={timelineOpen}
-              className="ml-auto rounded border border-neutral-300 px-2 py-0.5 text-[11px] text-neutral-600 hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-800"
-            >
-              {timelineOpen ? "收起" : "展开"}
-            </button>
-          </div>
-          <div className="h-[calc(100%-2rem)]">
-            <Timeline events={events} variant="sidebar" collapsed={!timelineOpen} />
-          </div>
+        <aside id="run-timeline-sidebar" hidden={!timelineOpen} className={`timeline-sidebar sticky top-20 h-[calc(100vh-6rem)] w-52 shrink-0 ${timelineOpen ? "hidden xl:block" : "hidden"}`} aria-label="Agent 行动轨迹">
+          <h2 className="mb-3 text-xs font-semibold text-neutral-500">Agent 行动轨迹（实时）</h2>
+          <div className="h-[calc(100%-2rem)]"><Timeline events={events} variant="sidebar" /></div>
         </aside>
       </div>
     </main>

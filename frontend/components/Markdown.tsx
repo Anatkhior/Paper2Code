@@ -134,8 +134,63 @@ function parseBlocks(text: string): Block[] {
   return blocks;
 }
 
-export default function Markdown({ text, className = "" }: { text: string; className?: string }) {
+/**
+ * 行内模式：宿主容器本身不允许块级子元素时用（`<p>`、`<button>`）。
+ *
+ * 为什么必须有这个模式：块级模式的外层是个 `<div>`，塞进 `<p>` 里浏览器会在解析时
+ * 提前把 `<p>` 闭合（DOM 与 React 想的不一样，浏览器控制台直接报
+ * `<p> cannot contain a nested <div>`），塞进 `<button>` 里同样不合规范。
+ * 行内模式只产出 span/strong/em/code/a 这类行内节点：段落之间用 `<br/>` 断行，
+ * 列表项退化成「· 文本」前缀，绝不产生块级标签。
+ */
+function renderInlineBlocks(
+  blocks: Block[],
+  keyPrefix: string,
+): ReactNode {
+  const lines: string[] = [];
+  blocks.forEach((block) => {
+    switch (block.kind) {
+      case "p":
+        lines.push(block.lines.join(" "));
+        break;
+      case "h":
+        lines.push(block.text);
+        break;
+      case "quote":
+        lines.push(...block.lines);
+        break;
+      case "ul":
+      case "ol":
+        block.items.forEach((item, itemIndex) =>
+          lines.push(block.kind === "ol" ? `${itemIndex + 1}. ${item}` : `· ${item}`),
+        );
+        break;
+      case "code":
+        lines.push(block.text);
+        break;
+    }
+  });
+  return lines.map((line, lineIndex) => (
+    <Fragment key={`${keyPrefix}-l${lineIndex}`}>
+      {lineIndex > 0 && <br />}
+      {renderInline(line, `${keyPrefix}-l${lineIndex}`)}
+    </Fragment>
+  ));
+}
+
+export default function Markdown({
+  text,
+  className = "",
+  inline = false,
+}: {
+  text: string;
+  className?: string;
+  inline?: boolean;
+}) {
   const blocks = useMemo(() => parseBlocks(text ?? ""), [text]);
+  if (inline) {
+    return <span className={className}>{renderInlineBlocks(blocks, "in")}</span>;
+  }
   return (
     <div className={`space-y-2 ${className}`}>
       {blocks.map((block, blockIndex) => {

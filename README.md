@@ -3,7 +3,7 @@
 上传一篇论文 PDF + 粘贴一个 GitHub 仓库链接，系统用 Agent 自主探索，定位论文核心创新点对应的代码实现，
 并给出**可核验**的对照解读。
 
-> 当前状态：**v0（M0–M4）+ v1 三阶段全部完成并验收** —— 36+162+174+61+48+50+43 = **574 项断言**全部离线可复现：
+> 当前状态：**v0（M0–M4）+ v1 三阶段全部完成并验收** —— 36+162+174+61+48+61+43 = **585 项断言**全部离线可复现：
 > `cd backend && ./scripts/run_all_checks.sh`（含前端构建与生产页面渲染、gold set 评估）。
 >
 > v1 已做：**双栏对照阅读器**（左栏可切「PDF 原版（真实排版，滚动看全文）」与「原文文本（可划选）」，
@@ -11,6 +11,7 @@
 > 解释质量门槛（只有一句话的解释会被打回重写）、**在原文里划选 → 加为定位目标**、
 > **追问对话**（Agent 自己去翻论文和代码；每条消息 8 次工具调用上限；回答里的代码位置逐个机械核对）。
 > 网页上能跑通完整流程：上传论文 → 侦察出创新点清单 → 勾选 → 克隆仓库定位 → **双栏对照 + 点开看原文 + 覆盖率/核验率**。
+> 创新点以完整目录浏览，勾选与切换互不影响；右侧聚焦当前条目的解释与证据，长篇讲解按需展开。点击引用打开原文/代码，支持方向键和 Home/End。
 > 详细规格见 [`docs/v0-spec.md`](docs/v0-spec.md)，进度见该文档 §12 里程碑表。
 
 ## 已经能做什么
@@ -112,7 +113,7 @@ uv pip install --python .venv/bin/python -r requirements.txt
 .venv/bin/python -m scripts.m2_check   # M2 阶段 B（174 项）
 .venv/bin/python -m scripts.m3_check   # M3 对照界面 + 前端构建渲染（61 项；跑前先停掉 next dev）
 .venv/bin/python -m scripts.m4_check   # M4 gold set + 指标自检 + README 一致性（48 项）
-.venv/bin/python -m scripts.m6_check   # v1② 划选→定位目标（50 项；跑前先停掉 next dev）
+.venv/bin/python -m scripts.m6_check   # v1② 划选→定位目标（61 项；跑前先停掉 next dev）
 .venv/bin/python -m scripts.m7_check   # v1③ 追问对话（43 项；跑前先停掉 next dev）
 
 # 或者一键全跑（推荐）

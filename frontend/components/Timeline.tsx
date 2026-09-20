@@ -132,11 +132,7 @@ export default function Timeline({
   if (events.length === 0) {
     return (
       <div className="rounded-lg border border-dashed border-neutral-300 p-6 text-sm text-neutral-500 dark:border-neutral-800">
-        还没有事件。上传论文并开始侦察后，Agent 的每一步行动都会实时出现在这里。
-        <p className="mt-2 text-xs">
-          注意：这里展示的是**可观测的行动轨迹**（调了什么工具、参数是什么、返回了什么），
-          不是模型的思维链——OpenAI/Anthropic 的 API 并不返回可展示的原始推理过程。
-        </p>
+        上传论文后，这里实时显示阅读、搜索与核验进展。
       </div>
     );
   }
@@ -153,7 +149,7 @@ export default function Timeline({
             : "h-full"
           : collapsed
             ? "max-h-[9rem]"
-            : "max-h-[70vh]"
+            : "max-h-48"
       }`}
     >
       <ol className="space-y-1.5">
@@ -168,15 +164,18 @@ export default function Timeline({
           const info = describe(item.event);
           const offset = ((item.event.ts - start) * 1000).toFixed(0);
           return (
-            <li key={item.event.id} className="flex gap-2 text-sm">
-              <span className="w-14 shrink-0 text-right font-mono text-[11px] text-neutral-400">{offset}ms</span>
-              <span className={info.tone}>{info.icon}</span>
-              <span className="min-w-0 flex-1">
-                <span className={`font-medium ${info.tone}`}>{info.title}</span>
-                {info.detail && (
-                  <span className="ml-2 break-all font-mono text-[11px] text-neutral-500">{info.detail}</span>
-                )}
-              </span>
+            <li key={item.event.id} className="border-b border-neutral-100 py-2 last:border-0 dark:border-neutral-900">
+              <div className="flex items-start gap-2 text-xs leading-5">
+                <span className={info.tone}>{info.icon}</span>
+                <span className={`min-w-0 flex-1 break-words font-medium ${info.tone}`}>{info.title}</span>
+              </div>
+              <div className="mt-1 flex items-start gap-2 text-[10px] text-neutral-400">
+                <span className="shrink-0 font-mono">{offset}ms</span>
+                {info.detail && <details className="min-w-0 flex-1">
+                  <summary>详情</summary>
+                  <p className="mt-1 break-all font-mono leading-5 text-neutral-500">{info.detail}</p>
+                </details>}
+              </div>
             </li>
           );
         })}

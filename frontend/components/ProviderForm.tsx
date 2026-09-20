@@ -23,9 +23,9 @@ export default function ProviderForm({ value, onChange, smoke, smokeBusy, onSmok
 
   return (
     <section className="rounded-lg border border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-950">
-      <header className="mb-3 flex items-center justify-between">
-        <h2 className="text-sm font-semibold">1. 模型（自带 key）</h2>
-        <div className="flex gap-1">
+      <header className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold">模型设置（自带 key）</h2>
+        <div className="flex flex-wrap gap-1">
           {PRESETS.map((preset) => (
             <button
               key={preset.label}
@@ -40,46 +40,46 @@ export default function ProviderForm({ value, onChange, smoke, smokeBusy, onSmok
       </header>
 
       <div className="grid grid-cols-2 gap-2 text-sm">
-        <label className="col-span-2 flex flex-col gap-1">
+        <label className="col-span-2 flex min-w-0 flex-col gap-1">
           <span className="text-xs text-neutral-500">协议</span>
           <select
             value={value.protocol}
             onChange={(event) => set({ protocol: event.target.value as ProviderConfig["protocol"] })}
-            className="rounded border border-neutral-300 bg-transparent px-2 py-1 dark:border-neutral-700"
+            className="min-w-0 w-full rounded border border-neutral-300 bg-transparent px-2 py-1 dark:border-neutral-700"
           >
             <option value="openai-compatible">OpenAI 兼容（OpenAI / DeepSeek / Moonshot / Groq / vLLM / Ollama…）</option>
             <option value="anthropic">Anthropic</option>
           </select>
         </label>
 
-        <label className="col-span-2 flex flex-col gap-1">
+        <label className="col-span-2 flex min-w-0 flex-col gap-1">
           <span className="text-xs text-neutral-500">base_url（官方端点可留空）</span>
           <input
             value={value.base_url ?? ""}
             onChange={(event) => set({ base_url: event.target.value })}
             placeholder="https://api.deepseek.com/v1"
-            className="rounded border border-neutral-300 bg-transparent px-2 py-1 font-mono text-xs dark:border-neutral-700"
+            className="min-w-0 w-full rounded border border-neutral-300 bg-transparent px-2 py-1 font-mono text-xs dark:border-neutral-700"
           />
         </label>
 
-        <label className="flex flex-col gap-1">
+        <label className="flex min-w-0 flex-col gap-1">
           <span className="text-xs text-neutral-500">api_key（只放在请求体里，不落库、不进日志）</span>
           <input
             type="password"
             value={value.api_key}
             onChange={(event) => set({ api_key: event.target.value })}
             placeholder="sk-..."
-            className="rounded border border-neutral-300 bg-transparent px-2 py-1 font-mono text-xs dark:border-neutral-700"
+            className="min-w-0 w-full rounded border border-neutral-300 bg-transparent px-2 py-1 font-mono text-xs dark:border-neutral-700"
           />
         </label>
 
-        <label className="flex flex-col gap-1">
+        <label className="flex min-w-0 flex-col gap-1">
           <span className="text-xs text-neutral-500">模型名</span>
           <input
             value={value.model}
             onChange={(event) => set({ model: event.target.value })}
             placeholder="deepseek-chat"
-            className="rounded border border-neutral-300 bg-transparent px-2 py-1 font-mono text-xs dark:border-neutral-700"
+            className="min-w-0 w-full rounded border border-neutral-300 bg-transparent px-2 py-1 font-mono text-xs dark:border-neutral-700"
           />
         </label>
       </div>

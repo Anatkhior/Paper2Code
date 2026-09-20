@@ -315,63 +315,25 @@ async def section_b(check: Checker) -> None:
         async with httpx.AsyncClient() as plain:
             html = (await plain.get(f"http://127.0.0.1:{FRONTEND_PORT}/", timeout=30)).text
         markers = {
-            "1. 模型（自带 key）": "provider 表单",
-            "2. 论文 PDF": "论文上传",
-            "3. 创新点清单": "清单勾选区",
-            "4. 代码仓库": "阶段 B 输入区",
-            "5. Agent 行动轨迹": "时间线",
-            "6. 对照阅读器": "双栏阅读器",
-            "7. 追问": "追问面板（放在阅读器与结论之间，方便边看边问）",
-            "8. 逐条结论": "逐条结论区",
-            "论文原文": "阅读器左栏（论文原文）",
-            "PDF 原版": "PDF 视图开关",
-            "原文文本": "文本视图开关（可划选）",
-            "代码实现": "阅读器右栏（代码实现）",
-            "覆盖率与预算": "覆盖率/预算卡片",
-            "点得开原文": "引用可点击的提示",
+            "模型设置": "provider 表单",
+            "论文 PDF": "论文上传",
+            "核心创新点": "创新点阅读区",
+            "代码仓库": "阶段 B 输入区",
+            "Agent 行动轨迹": "时间线",
+            "对照阅读器": "按需阅读器入口",
+            "追问": "追问入口",
+            "分析准备": "可收起的准备区",
         }
         for marker, description in markers.items():
             check(marker in html, f"页面渲染出「{description}」（{marker}）")
         check("PaperLens" in html, "页面标题正常")
-
-        # 版式回归（2026-09-16 用户反馈）：
-        # ① 「核心创新点」下面那个定位按钮与第 4 节的重复 → 已移除，只保留一个动作入口
-        check(
-            "开始定位选中项" not in html,
-            "创新点清单区不再有第二个「开始定位」按钮（与第 4 节重复）",
-        )
-        check(
-            "开始定位选中的" in html,
-            "第 4 节仍然保留唯一的定位入口（文案带选中条数）",
-        )
-        # ② 追问面板要夹在「对照阅读器」与「逐条结论」之间（用户要求的阅读/交互顺序）
-        order = [html.find(name) for name in ("6. 对照阅读器", "7. 追问", "8. 逐条结论")]
-        check(
-            all(pos >= 0 for pos in order) and order == sorted(order),
-            f"页面顺序：对照阅读器 → 追问 → 逐条结论（位置 {order}）",
-        )
-        # ③ 结论区的引导文案要跟新顺序一致（上面隔着追问面板）
-        #    （阅读器"PDF 内置查找高亮 + 高亮自动进视野"是运行期行为，由 m6 从打包产物里断言）
-        check(
-            "上方的对照阅读器会跳到对应位置" in html,
-            "逐条结论区的引导文案与新版式一致（点引用 → 上方阅读器跳过去）",
-        )
-        # ④ 行动轨迹可收起/展开（2026-09-17 起默认展开：用户要求任何步骤都能看到实时轨迹。
-        #    默认展开时两个按钮都显示「收起」——断言开关存在 + aria-expanded 在产物里）
-        check(
-            "aria-expanded" in html and "收起" in html,
-            "行动轨迹有展开/收起开关（宽屏侧栏默认展开）",
-        )
-        # ⑤ 布局（2026-09-17 用户反馈：创新点单列太浪费、轨迹该常驻侧栏）
-        check(
-            "timeline-sidebar" in html and "sticky top-4" in html and "xl:block" in html,
-            "行动轨迹有常驻侧栏（sticky + 固定宽度 + 宽屏才显示）——任何步骤都能看到进展",
-        )
-        check(
-            "xl:hidden" in html,
-            "窄屏退回正文里的内联轨迹（侧栏放不下时仍能看到）",
-        )
-        # 创新点/结论的多列网格只在有数据时渲染，属于打包产物层面的断言（见 m6）
+        check(html.count("开始定位选中的") == 1, "仓库保留唯一定位入口")
+        check("aria-expanded" in html and "run-status" in html, "实时状态常驻，轨迹可展开收起")
+        check("timeline-sidebar" in html and "sticky top-20" in html and "xl:block" in html,
+              "宽屏保留常驻行动轨迹")
+        check("xl:hidden" in html, "窄屏有内联行动轨迹")
+        check('class="reader-pane' not in html, "尚未选择引用时不渲染大面积空阅读器")
+        check('id="analysis-setup"' in html, "准备区保留可访问的折叠控件")
     finally:
         server.terminate()
         try:

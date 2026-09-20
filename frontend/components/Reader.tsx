@@ -84,17 +84,20 @@ export default function Reader({
 }: Props) {
   const [paperMode, setPaperMode] = useState<PaperMode>("pdf");
   const focusRef = useRef<HTMLDivElement>(null);
+  const codeBodyRef = useRef<HTMLDivElement>(null);
   const paperMarkRef = useRef<HTMLElement>(null);
   const pdfBoxRef = useRef<HTMLDivElement>(null);
   const paperBodyRef = useRef<HTMLDivElement>(null);
   const [selection, setSelection] = useState<{ text: string; x: number; y: number } | null>(null);
   const quoteParts = useMemo(
     () => (left?.text ? locateQuote(left.text, left.quote) : null),
-    [left?.text, left?.quote],
+    [left],
   );
 
   useEffect(() => {
-    focusRef.current?.scrollIntoView({ block: "center" });
+    const box = codeBodyRef.current;
+    const target = focusRef.current;
+    if (box && target) box.scrollTop += target.getBoundingClientRect().top - box.getBoundingClientRect().top - box.clientHeight / 2;
   }, [right?.path, right?.start, right?.end, right?.lines]);
 
   /**
@@ -106,7 +109,9 @@ export default function Reader({
   useEffect(() => {
     if (!quoteParts) return;
     const timer = window.setTimeout(() => {
-      paperMarkRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+      const box = paperBodyRef.current;
+      const mark = paperMarkRef.current;
+      if (box && mark) box.scrollTop += mark.getBoundingClientRect().top - box.getBoundingClientRect().top - box.clientHeight / 2;
     }, 60);
     return () => window.clearTimeout(timer);
   }, [left?.quote, left?.text, left?.page, paperMode, quoteParts]);
@@ -149,15 +154,15 @@ export default function Reader({
   const firstRect = rects[0];
   // **每个矩形都要画**：后端把引文按行拆成多个矩形（换行一段一个），
   // 之前只画 rects[0]，换行后的句子就丢了高亮（2026-09-17 用户实测）。
-  const highlightStyles =
+  const highlightStyles = useMemo(() =>
     pageWidth > 0 && pageHeight > 0
-      ? rects.map((rect) => ({
+      ? (left?.rects ?? []).map((rect) => ({
           left: `${(rect[0] / pageWidth) * 100}%`,
           top: `${(rect[1] / pageHeight) * 100}%`,
           width: `${((rect[2] - rect[0]) / pageWidth) * 100}%`,
           height: `${((rect[3] - rect[1]) / pageHeight) * 100}%`,
         }))
-      : [];
+      : [], [left?.rects, pageWidth, pageHeight]);
 
   /**
    * 原版页面视图的高亮同样自动进视野：整页图通常比窗格高，只把窗口滚到阅读器还不够，
@@ -175,29 +180,29 @@ export default function Reader({
 
   return (
     <div className="relative">
-      <div className="mb-2 flex flex-wrap items-center gap-2 rounded border border-dashed border-neutral-300 px-3 py-1.5 text-[11px] text-neutral-500 dark:border-neutral-800">
-        <span>左栏可以切两种看法：</span>
+      {left && <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-neutral-500">
+
         <button
           type="button"
           onClick={() => setPaperMode("pdf")}
           className={`rounded px-2 py-0.5 ${paperMode === "pdf" ? "bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900" : "border border-neutral-300 dark:border-neutral-700"}`}
         >
-          PDF 原版（真实排版，滚动看全文）
+          PDF 原版
         </button>
         <button
           type="button"
           onClick={() => setPaperMode("text")}
           className={`rounded px-2 py-0.5 ${paperMode === "text" ? "bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900" : "border border-neutral-300 dark:border-neutral-700"}`}
         >
-          原文文本（可划选加目标）
+          原文文本（可划选）
         </button>
         <span>
           {paperMode === "pdf"
-            ? "PDF 视图是真实排版（公式、图都在），但里面选中的文字拿不到。要划选一段原文加成目标，请切到「原文文本」，划选后点「以此为目标定位代码」。"
-            : "在文本视图里用鼠标划选一段原文 → 点「以此为目标定位代码」，系统就去找这段话对应的实现。"}
+            ? "保留公式与图表；划选添加目标请切到原文文本。"
+            : "划选一段原文，可将它加入定位目标。"}
         </span>
-      </div>
-      <div className="grid gap-3 lg:grid-cols-2" onMouseUp={handleMouseUp}>
+      </div>}
+      <div className={`grid items-start gap-3 ${left && right ? "lg:grid-cols-2" : ""}`} onMouseUp={handleMouseUp}>
       {selection && onSelectTarget && (
         <button
           type="button"
@@ -218,10 +223,9 @@ export default function Reader({
         </button>
       )}
       {/* ---------------- 左：论文原文 ---------------- */}
-      <section className="flex h-[62vh] min-h-[380px] flex-col overflow-hidden rounded-lg border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950">
+      {left && <section className="reader-pane rounded-lg border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950">
         <header className="flex flex-wrap items-center gap-2 border-b border-neutral-200 px-3 py-2 dark:border-neutral-800">
           <h3 className="text-xs font-semibold uppercase tracking-wide text-neutral-500">论文原文</h3>
-          {left ? (
             <>
               <span className="font-mono text-[11px] text-neutral-500">
                 第 {left.page} 页{left.pageCount ? ` / 共 ${left.pageCount} 页` : ""}
@@ -245,14 +249,14 @@ export default function Reader({
                 </button>
               </div>
             </>
-          ) : (
-            <span className="ml-auto text-[11px] text-neutral-400">点下面的论文证据，这里显示那一页</span>
-          )}
+
         </header>
 
         {paperMode === "pdf" && (
           <div className="flex min-h-0 flex-1 flex-col bg-neutral-100 dark:bg-neutral-900">
-            {left?.quote && (
+            {left.loading && <p className="p-3 text-sm text-neutral-500">读取中…</p>}
+            {left.error && <p className="p-3 text-sm text-red-600">{left.error}</p>}
+            {left.quote && !left.loading && !left.error && (
               <p className="border-b border-neutral-200 bg-white px-3 py-1 text-[11px] text-neutral-500 dark:border-neutral-800 dark:bg-neutral-950">
                 {highlightStyles.length > 0
                   ? (left.coverage ?? 1) < 0.999
@@ -270,14 +274,20 @@ export default function Reader({
                 )}
               </p>
             )}
-            <div ref={pdfBoxRef} className="relative min-h-0 flex-1 overflow-auto p-2">
-              {imageUrl && left ? (
+            <div ref={pdfBoxRef} className="reader-body relative min-h-0 p-2">
+              {imageUrl && !left.loading && !left.error ? (
                 <div className="relative mx-auto w-full max-w-[720px]">
                   {/* 渲染图铺满容器宽度；高亮框按百分比定位，所以缩放/换屏都不会错位 */}
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
                     src={imageUrl}
                     alt={`论文第 ${left.page} 页`}
+                    width={pageWidth || undefined}
+                    height={pageHeight || undefined}
+                    onLoad={() => {
+                      const box = pdfBoxRef.current;
+                      if (box && firstRect && pageHeight) box.scrollTop = Math.max(0, (firstRect[1] / pageHeight) * box.scrollHeight - box.clientHeight / 2);
+                    }}
                     className="block w-full rounded border border-neutral-300 bg-white dark:border-neutral-700"
                   />
                   {highlightStyles.map((style, index) => (
@@ -289,25 +299,15 @@ export default function Reader({
                     />
                   ))}
                 </div>
-              ) : (
-                <p className="p-3 text-sm text-neutral-500">
-                  这份 run 没有可显示的 PDF。
-                </p>
-              )}
+              ) : null}
             </div>
           </div>
         )}
 
         <div
           ref={paperBodyRef}
-          className={`min-h-0 flex-1 overflow-auto p-3 ${paperMode === "pdf" ? "hidden" : ""}`}
+          className={`reader-body min-h-0 p-3 ${paperMode === "pdf" ? "hidden" : ""}`}
         >
-          {!left && (
-            <p className="text-sm text-neutral-500">
-              还没选内容。在下面任意一条结论里点「第 N 页」的引文，这一页的完整原文就会出现在这里，
-              被引用的那句话会被高亮出来。
-            </p>
-          )}
           {left?.loading && <p className="text-sm text-neutral-500">读取中…</p>}
           {left?.error && <p className="text-sm text-red-600">{left.error}</p>}
           {left && !left.loading && !left.error && (
@@ -334,13 +334,12 @@ export default function Reader({
             </p>
           )}
         </div>
-      </section>
+      </section>}
 
       {/* ---------------- 右：代码实现 ---------------- */}
-      <section className="flex h-[62vh] min-h-[380px] flex-col overflow-hidden rounded-lg border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950">
+      {right && <section className="reader-pane rounded-lg border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950">
         <header className="flex flex-wrap items-center gap-2 border-b border-neutral-200 px-3 py-2 dark:border-neutral-800">
           <h3 className="text-xs font-semibold uppercase tracking-wide text-neutral-500">代码实现</h3>
-          {right ? (
             <>
               <span className="truncate font-mono text-[11px] text-neutral-500">
                 {right.path}:{right.start}-{right.end}
@@ -357,9 +356,7 @@ export default function Reader({
                 </a>
               )}
             </>
-          ) : (
-            <span className="ml-auto text-[11px] text-neutral-400">点下面的代码引用，这里显示那段代码</span>
-          )}
+
         </header>
 
         {right?.commit && (
@@ -368,13 +365,7 @@ export default function Reader({
           </p>
         )}
 
-        <div className="min-h-0 flex-1 overflow-auto p-3">
-          {!right && (
-            <p className="text-sm text-neutral-500">
-              还没选内容。在下面任意一条结论里点 `文件:行号`，那一段代码会出现在这里，
-              被引用的行会被高亮，并且**一直保留上下文**（可以往上往下滚看整个文件）。
-            </p>
-          )}
+        <div ref={codeBodyRef} className="reader-body min-h-0 p-3">
           {right?.loading && <p className="text-sm text-neutral-500">读取中…</p>}
           {right?.error && <p className="text-sm text-red-600">{right.error}</p>}
           {right && !right.loading && !right.error && (
@@ -401,7 +392,7 @@ export default function Reader({
             为什么这段对应那个创新点：{right.why}
           </p>
         )}
-      </section>
+      </section>}
       </div>
     </div>
   );

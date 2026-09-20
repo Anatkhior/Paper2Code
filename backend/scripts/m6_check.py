@@ -279,9 +279,7 @@ async def section_c(check: Checker) -> None:
         async with httpx.AsyncClient() as plain:
             html = (await plain.get(f"http://127.0.0.1:{FRONTEND_PORT}/", timeout=30)).text
         for marker, description in {
-            "以此为目标定位代码": "划选后的动作按钮",
-            "划选一段原文": "划选提示（常驻可见）",
-            "你添加的": "用户目标标记的说明",
+            "核心创新点": "创新点阅读区",
             # 回归：按钮旁边必须写清"还差什么"，并且反馈条是 sticky 的。
             # 起因是用户点「开始定位」没反应——唯一反馈渲染在页面顶部屏幕外，等于静默失败。
             "还差：": "按钮旁边写清缺什么（防静默失败）",
@@ -318,6 +316,11 @@ async def section_c(check: Checker) -> None:
         #      不再用 scrollIntoView 把整个窗口拽走。
         chunks = list((FRONTEND / ".next" / "static" / "chunks").rglob("*.js"))
         texts = [chunk.read_text(encoding="utf-8", errors="ignore") for chunk in chunks]
+        # 目录的响应式和深色规则从构建后的 CSS 验证。
+        css_text = "\n".join(
+            chunk.read_text(encoding="utf-8", errors="ignore")
+            for chunk in (FRONTEND / ".next" / "static").rglob("*.css")
+        )
         check(
             any("highlight_rects" in text for text in texts),
             "原版页面视图：高亮框数据（highlight_rects）进了打包产物",
@@ -341,14 +344,68 @@ async def section_c(check: Checker) -> None:
             any("smoke-compact" in text for text in texts),
             "自检通过的紧凑样式进了打包产物（成功后不再摆 capabilities JSON）",
         )
-        # 布局：创新点勾选与逐条结论都用多列网格（用户反馈单列太浪费空间）
-        check(
-            any("plan-list" in text and "findings-grid" in text for text in texts),
-            "多列网格进产物：创新点勾选区（.plan-list）与逐条结论（.findings-grid）",
+        # 2026-09-19：目录与当前结论共用选中项，引用按需展开。
+        check(any('role:"tablist"' in text and "innovation-detail" in text for text in texts),
+              "目录和当前详情具备可访问的选项卡结构")
+        check(any("aria-selected" in text and "aria-orientation" in text for text in texts),
+              "纵向目录声明当前选中项和方向")
+        check(any("查看原文" in text and "onOpenPaper" in text for text in texts),
+              "论文引文保留阅读器入口")
+        check(any("清单里还没有创新点" in text and "取消全选" in text for text in texts),
+              "空清单提示与选择操作保留")
+        check(any("未产出这条结论" in text and "未找到实现" in text for text in texts),
+              "缺失结论与未找到实现分别展示")
+        check(any("reading-disclosure" in text and "逐段讲解" in text for text in texts),
+              "较长的逐段讲解按需展开")
+        check(any("以此为目标定位代码" in text and "划选一段原文" in text for text in texts),
+              "按需阅读器保留划选添加目标")
+        check("innovation-tabs" in css_text and "innovation-tab-title" in css_text,
+              "完整目录及长标题换行样式进入 CSS")
+        check("--reading-active" in css_text and "prefers-color-scheme:dark" in css_text,
+              "目录的浅色和深色选中态进入 CSS")
+        check(not any("findings-grid" in text or '"plan-tabs"' in text for text in texts),
+              "旧的横向隐藏标签与嵌套结论网格已移除")
+        reader_source = (FRONTEND / "components/Reader.tsx").read_text()
+        check("scrollIntoView(" not in reader_source,
+              "阅读器高亮只滚动自身容器，不抢窗口")
+
+        # Markdown 的 DOM 合法性（2026-09-17 从浏览器控制台抓到：
+        # `<p> cannot contain a nested <div>`）。
+        #   块级 Markdown 的外层是 <div>，一旦被塞进 <p>（或只允许行内容的 <button>），
+        #   浏览器解析时会提前闭合 <p>，DOM 与 React 认为的结构不一致。
+        #   这条规则只能看源码：出问题的那几处内容是跑完一轮之后才有数据渲染的，
+        #   服务端 HTML 与打包产物里都看不到这个嵌套关系（放对层）。
+        #   约定：多个段落/列表的解释用块级 Markdown + <div> 宿主；
+        #   在 <p>/<button> 里必须显式写 inline。
+        jsx_files = sorted(
+            list((FRONTEND / "app").rglob("*.tsx")) + list((FRONTEND / "components").rglob("*.tsx"))
         )
         check(
-            any("xl:grid-cols-2" in text for text in texts),
-            "逐条结论在宽屏下是两列（xl:grid-cols-2）",
+            len(jsx_files) >= 10,
+            f"扫到前端源码 {len(jsx_files)} 个 tsx 文件（少于 10 个说明扫描路径写错了）",
+        )
+        offenders: list[str] = []
+        for path in jsx_files:
+            source = path.read_text(encoding="utf-8", errors="ignore")
+            # JSX 注释里的标签示例不是 DOM；保留换行让失败位置仍能定位到源码。
+            source = re.sub(
+                r"\{/\*.*?\*/\}", lambda match: "\n" * match.group(0).count("\n"), source, flags=re.S
+            )
+            depth = 0
+            # 顺序扫 <p>/</p>/<Markdown…>：落在 <p> 里且没写 inline 的就是违规。
+            for token in re.finditer(r"<p\b[^>]*>|</p>|<Markdown\b[^>]*>", source):
+                raw = token.group(0)
+                if raw.startswith("<p"):
+                    depth += 1
+                elif raw == "</p>":
+                    depth = max(0, depth - 1)
+                elif depth and "inline" not in raw:
+                    line_no = source.count("\n", 0, token.start()) + 1
+                    offenders.append(f"{path.name}:{line_no}")
+        check(
+            not offenders,
+            "块级 Markdown 没被塞进 <p>（违规写法会触发 <p> cannot contain a nested <div>）"
+            + (f"：{', '.join(sorted(set(offenders)))}" if offenders else ""),
         )
     finally:
         server.terminate()

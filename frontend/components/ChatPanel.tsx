@@ -89,17 +89,17 @@ export default function ChatPanel({
   return (
     <section className="rounded-lg border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950">
       <header className="flex flex-wrap items-center gap-2 border-b border-neutral-200 px-3 py-2 dark:border-neutral-800">
-        <h2 className="text-sm font-semibold">7. 追问</h2>
+        <h2 className="text-sm font-semibold">追问</h2>
         <span className="text-[11px] text-neutral-500">
           它可以自己去翻论文和代码（每条消息最多 8 次工具调用），回答里的代码位置会被机械核对
         </span>
       </header>
 
-      <div ref={scrollerRef} className="max-h-[52vh] min-h-[160px] space-y-3 overflow-auto p-3">
+      <div ref={scrollerRef} className="max-h-[52vh] space-y-3 overflow-auto p-3">
         {turns.length === 0 && !streaming && (
           <p className="text-sm text-neutral-500">
             还没问过。已经帮你把整份分析结果（创新点、论文证据、代码引用、解释）放在它的上下文里，
-            所以可以直接问"这个 scaling 到底在哪用到的""为什么 B 要置零""第 3 页那个公式里的 r 是什么"。
+            可以直接问「这个 scaling 在哪用到」或「为什么 B 要置零」。
           </p>
         )}
 
@@ -184,7 +184,7 @@ export default function ChatPanel({
             }}
             rows={2}
             placeholder={disabled ? "先上传论文" : "问点什么…（Enter 发送，Shift+Enter 换行）"}
-            className="min-h-[52px] flex-1 resize-y rounded border border-neutral-300 bg-transparent px-2 py-1 text-sm dark:border-neutral-700"
+            className="min-h-[52px] min-w-0 flex-1 resize-y rounded border border-neutral-300 bg-transparent px-2 py-1 text-sm dark:border-neutral-700"
           />
           <button
             type="button"

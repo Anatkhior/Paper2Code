@@ -26,24 +26,86 @@ body {
 }
 
 
-/* 创新点勾选区：多列网格（每条单列竖排空间利用率太低，用户实测反馈）。
-   窄屏单列；宽屏两列；超宽屏（清单区已占满宽栏）三列。 */
-.plan-list {
-  display: grid;
-  gap: 0.5rem;
+/* 目录始终完整铺开；条目数量不会变成不可发现的横向溢出。 */
+:root {
+  --reading-accent: #0f766e;
+  --reading-active: #f0fdfa;
+  --reading-line: #e5e5e5;
 }
-@media (min-width: 1100px) {
-  .plan-list {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+@media (prefers-color-scheme: dark) {
+  :root {
+    --reading-accent: #5eead4;
+    --reading-active: #102a28;
+    --reading-line: #262626;
   }
 }
-@media (min-width: 1536px) {
-  .plan-list {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
+body { background: #f7f8fa; }
+@media (prefers-color-scheme: dark) { body { background: #0a0a0a; } }
+button:not(:disabled), summary { cursor: pointer; }
+button:focus-visible, summary:focus-visible, .innovation-detail:focus-visible {
+  outline: 2px solid var(--reading-accent);
+  outline-offset: 3px;
 }
-
-/* 创新点卡片的详情滑动窗口：展开时限高内部滚动（内容长也不撑爆卡片） */
-.detail-scroll {
-  scrollbar-width: thin;
+.primary-button {
+  border-radius: 0.5rem;
+  background: #0f766e;
+  color: white;
+  padding: 0.625rem 1rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+.primary-button:hover { background: #115e59; }
+.primary-button:disabled { opacity: 0.45; cursor: default; }
+.innovation-layout { display: grid; align-items: start; }
+.innovation-directory { min-width: 0; padding: 1rem; }
+.innovation-tabs { display: flex; flex-direction: column; gap: 0.375rem; }
+.innovation-nav-item { position: relative; min-width: 0; }
+.innovation-tab {
+  display: block;
+  width: 100%;
+  padding: 0.625rem 0.75rem 0.625rem 2.5rem;
+  border-radius: 0.5rem;
+  border: 1px solid transparent;
+  text-align: left;
+}
+.innovation-tab:hover { background: var(--reading-active); }
+.innovation-tab[aria-selected="true"] {
+  background: var(--reading-active);
+  border-color: var(--reading-accent);
+}
+.innovation-tab-title {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  font-weight: 500;
+}
+.innovation-check {
+  position: absolute;
+  top: 0.75rem;
+  left: 0.75rem;
+  width: 0.9375rem;
+  height: 0.9375rem;
+  accent-color: var(--reading-accent);
+}
+.innovation-detail {
+  min-width: 0;
+  padding: 1.25rem;
+  border-top: 1px solid var(--reading-line);
+  overflow-wrap: anywhere;
+}
+.plan-detail-title { width: 100%; overflow-wrap: anywhere; }
+.reading-section { font-size: 0.875rem; line-height: 1.85; }
+.reading-section > h4 { margin-bottom: 0.75rem; font-size: 0.75rem; font-weight: 600; color: #737373; }
+.reading-disclosure { border-top: 1px solid var(--reading-line); padding-top: 1rem; }
+.reading-disclosure > summary { font-size: 0.8125rem; font-weight: 500; }
+.setup-panel section { border: none; padding: 0; }
+.reader-pane { display: flex; min-width: 0; flex-direction: column; max-height: 72vh; overflow: hidden; }
+.reader-body { max-height: 60vh; overflow: auto; }
+@media (min-width: 768px) {
+  .innovation-layout { grid-template-columns: 14rem minmax(0, 1fr); }
+  .innovation-detail { border-top: none; border-left: 1px solid var(--reading-line); padding: 1.5rem; }
 }

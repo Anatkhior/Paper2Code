@@ -1,226 +1,175 @@
 "use client";
 
-import { useState } from "react";
-
-import type { Innovation, Plan } from "@/lib/types";
+import { useRef, useState, type KeyboardEvent } from "react";
+import { FindingStatus, PaperEvidenceList } from "@/components/Evidence";
+import type { Finding, Innovation, Plan } from "@/lib/types";
 
 interface Props {
-  plan: Plan | null;
+  plan: Plan;
   selected: Set<string>;
+  activeId: string;
+  findings: Finding[];
+  missingIds: string[];
+  busy: boolean;
+  onActivate: (id: string) => void;
   onToggle: (id: string) => void;
   onSelectAll: () => void;
-  onRename?: (id: string, name: string) => void;
-  onDelete?: (id: string) => void;
 }
 
-const DIFFICULTY: Record<Innovation["difficulty"], { label: string; className: string }> = {
-  beginner: { label: "入门", className: "bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-200" },
-  medium: { label: "中等", className: "bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-200" },
-  hard: { label: "偏难", className: "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200" },
+interface DetailProps {
+  active: Innovation;
+  hasFinding: boolean;
+  onRename: (id: string, name: string) => void;
+  onDelete: (id: string) => void;
+  onOpenPaper: (page: number, quote: string) => void;
+}
+
+const DIFFICULTY: Record<Innovation["difficulty"], string> = {
+  beginner: "入门", medium: "中等", hard: "偏难",
 };
 
-export default function PlanList({
-  plan,
-  selected,
-  onToggle,
-  onSelectAll,
-  onRename,
-  onDelete,
-}: Props) {
-  const [editing, setEditing] = useState<string | null>(null);
-  const [draft, setDraft] = useState("");
-  // 每张卡片的详情（引文/关键词）默认收起；展开状态记在这里
-  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+export default function PlanList({ plan, selected, activeId, findings, missingIds, busy, onActivate, onToggle, onSelectAll }: Props) {
+  const tabsRef = useRef<HTMLDivElement>(null);
+  const innovations = plan.innovations;
+  const selectedCount = innovations.filter((item) => selected.has(item.id)).length;
 
-  if (!plan) {
-    return (
-      <div className="rounded-lg border border-dashed border-neutral-300 p-6 text-sm text-neutral-500 dark:border-neutral-800">
-        阶段 A 完成后，这里会列出论文的核心创新点，由你勾选要深入定位哪几条。
-        <p className="mt-2 text-xs">
-          为什么要你勾选：系统猜的核心创新点未必是<strong>你想看懂的那一块</strong>。
-          你也可以直接在左边原文里划选一段，把它加成「你添加的」目标，让系统照着你指的方向去找。
-        </p>
-      </div>
-    );
-  }
+  const navigateTab = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    let next: number;
+    switch (event.key) {
+      case "ArrowDown": case "ArrowRight": next = (index + 1) % innovations.length; break;
+      case "ArrowUp": case "ArrowLeft": next = (index - 1 + innovations.length) % innovations.length; break;
+      case "Home": next = 0; break;
+      case "End": next = innovations.length - 1; break;
+      default: return;
+    }
+    event.preventDefault();
+    onActivate(innovations[next].id);
+    const button = tabsRef.current?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next];
+    button?.focus({ preventScroll: true });
+    if (button) {
+      const bounds = button.getBoundingClientRect();
+      const topInset = 80; // 顶部常驻状态条不能盖住键盘焦点。
+      if (bounds.top < topInset) window.scrollBy(0, bounds.top - topInset);
+      else if (bounds.bottom > window.innerHeight) window.scrollBy(0, bounds.bottom - window.innerHeight);
+    }
+  };
 
   return (
-    <div className="space-y-3">
-      <p className="text-[11px] text-neutral-500">
-        清单里带「你添加的」标记的条目，是你在左边原文里划选加进来的——系统照着它去找代码，而不是照 Agent 的猜测。
-      </p>
-
-      <div className="rounded-lg border border-neutral-200 bg-white p-3 text-sm dark:border-neutral-800 dark:bg-neutral-950">
-        <p className="font-medium">论文摘要（Agent 的概括）</p>
-        <p className="mt-1 whitespace-pre-wrap text-neutral-700 dark:text-neutral-300">{plan.paper_summary}</p>
-        {plan.coverage_note && (
-          <p className="mt-2 text-xs text-neutral-500">覆盖说明：{plan.coverage_note}</p>
-        )}
-      </div>
-
-      <div className="flex items-center justify-between">
-        <p className="text-sm font-semibold">
-          核心创新点（{plan.innovations.length} 条，已选 {selected.size} 条）
-        </p>
-        <button type="button" onClick={onSelectAll} className="text-xs text-neutral-500 underline">
-          全选 / 全不选
+    <nav className="innovation-directory" aria-label="创新点目录">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <span className="text-xs text-neutral-500">已选 {selectedCount} / {innovations.length} 条</span>
+        <button type="button" disabled={busy || !innovations.length} onClick={onSelectAll} className="text-xs text-teal-700 disabled:opacity-40 dark:text-teal-300">
+          {innovations.length > 0 && selectedCount === innovations.length ? "取消全选" : "全选"}
         </button>
       </div>
-
-      {/* 多列网格：创新点每条单列竖排的空间利用率太低（用户实测反馈）。
-          宽屏两列、超宽三列，铺满宽栏。
-          每张卡片是"滑动窗口"：默认只展示标题+简介，引文/关键词收进
-          默认收起的详情区（内部滚动、限高）——内容长短不再把整行卡片撑到一样高。 */}
-      <div className="plan-list items-start">
-      {plan.innovations.map((innovation) => {
-        const difficulty = DIFFICULTY[innovation.difficulty] ?? DIFFICULTY.medium;
-        const expanded = expandedIds.has(innovation.id);
-        const evidenceCount = innovation.paper_evidence.length;
-        return (
-          <div
-            key={innovation.id}
-            className={`rounded-lg border transition ${
-              selected.has(innovation.id)
-                ? "border-neutral-900 bg-neutral-50 dark:border-neutral-100 dark:bg-neutral-900"
-                : "border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950"
-            }`}
-          >
-            {/* 头部（整卡可点切换勾选）：复选框 + 标题行 + 一句话简介，默认全部可见 */}
-            <label className="block cursor-pointer p-3">
-              <div className="flex items-start gap-3">
-                <input
-                  type="checkbox"
-                  checked={selected.has(innovation.id)}
-                  onChange={() => onToggle(innovation.id)}
-                  className="mt-1"
-                />
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                    {editing === innovation.id ? (
-                      // 改名框占满卡片内宽（w-full 换行独占一行）：原来内联在标题行里，
-                      // 长名字会把框撑出卡片边界，超出的部分被相邻卡片的背景盖住（用户实测反馈）
-                      <input
-                        autoFocus
-                        value={draft}
-                        onChange={(event) => setDraft(event.target.value)}
-                        onBlur={() => {
-                          if (draft.trim()) onRename?.(innovation.id, draft.trim());
-                          setEditing(null);
-                        }}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") event.currentTarget.blur();
-                          if (event.key === "Escape") setEditing(null);
-                        }}
-                        className="w-full rounded border border-neutral-300 px-1.5 py-0.5 text-sm dark:border-neutral-700"
-                      />
-                    ) : (
-                      <span className="font-medium">{innovation.name}</span>
-                    )}
-                    {innovation.source === "user" && (
-                      <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[11px] text-blue-800 dark:bg-blue-950 dark:text-blue-200">
-                        你添加的
-                      </span>
-                    )}
-                    <span className={`rounded px-1.5 py-0.5 text-[11px] ${difficulty.className}`}>{difficulty.label}</span>
-                    <span className="font-mono text-[11px] text-neutral-400">{innovation.id}</span>
-                    {onRename && editing !== innovation.id && (
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          setDraft(innovation.name);
-                          setEditing(innovation.id);
-                        }}
-                        className="text-[11px] text-neutral-400 underline"
-                      >
-                        改名
-                      </button>
-                    )}
-                    {onDelete && (
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          onDelete(innovation.id);
-                        }}
-                        className="text-[11px] text-red-500 underline"
-                      >
-                        删除
-                      </button>
-                    )}
-                  </div>
-                  <p className="mt-1 text-sm text-neutral-700 dark:text-neutral-300">{innovation.one_liner}</p>
-                </div>
-              </div>
-            </label>
-
-            {/* 详情滑动窗口：默认收起；展开后限高内部滚动，卡片高度不会因内容长短失控 */}
-            <div className="border-t border-neutral-100 px-3 py-2 dark:border-neutral-800">
-              <button
-                type="button"
-                onClick={() =>
-                  setExpandedIds((current) => {
-                    const next = new Set(current);
-                    if (next.has(innovation.id)) next.delete(innovation.id);
-                    else next.add(innovation.id);
-                    return next;
-                  })
-                }
-                aria-expanded={expanded}
-                className="text-[11px] text-neutral-500 underline"
-              >
-                {expanded ? "收起引文与关键词" : `展开引文与关键词（${evidenceCount} 条）`}
+      <div ref={tabsRef} className="innovation-tabs" role="tablist" aria-label="核心创新点" aria-orientation="vertical">
+        {innovations.map((item, index) => {
+          const finding = findings.find((entry) => entry.id === item.id);
+          return (
+            <div key={item.id} role="presentation" className="innovation-nav-item">
+              <input type="checkbox" checked={selected.has(item.id)} disabled={busy} onChange={() => onToggle(item.id)} aria-label={`定位「${item.name}」`} className="innovation-check" />
+              <button type="button" id={`innovation-tab-${item.id}`} role="tab" tabIndex={activeId === item.id ? 0 : -1} aria-selected={activeId === item.id} aria-controls="innovation-detail" onClick={() => onActivate(item.id)} onKeyDown={(event) => navigateTab(event, index)} title={item.name} className="innovation-tab">
+                <span className="mb-1 flex flex-wrap items-center gap-2 text-[11px] text-neutral-500">
+                  <span>{String(index + 1).padStart(2, "0")}</span>
+                  {finding ? <FindingStatus status={finding.status} /> : <span>{missingIds.includes(item.id) ? "未产出结论" : busy && selected.has(item.id) ? "定位中" : "待定位"}</span>}
+                  {item.source === "user" && <span>你添加的</span>}
+                </span>
+                <span className="innovation-tab-title">{item.name}</span>
               </button>
-              {expanded && (
-                <div className="detail-scroll mt-2 max-h-64 space-y-1 overflow-y-auto pr-1">
-                  {innovation.paper_evidence.map((evidence, index) => (
-                    <div key={index} className="rounded border border-neutral-200 p-2 text-xs dark:border-neutral-800">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-[11px] text-neutral-500">第 {evidence.page} 页</span>
-                        {evidence.verified === true && evidence.quote_match !== "partial" && (
-                          <span className="text-[11px] text-green-600">✅ 引文已核验</span>
-                        )}
-                        {evidence.verified === true && evidence.quote_match === "partial" && (
-                          <span
-                            className="text-[11px] text-amber-600"
-                            title="只有开头部分逐字匹配到了这一页，后面的内容没有逐字出现——警惕后半段是编的"
-                          >
-                            ◐ 引文部分匹配
-                          </span>
-                        )}
-                        {evidence.verified === false && <span className="text-[11px] text-red-600">⚠ 引文未通过核验</span>}
-                        {evidence.verified == null && <span className="text-[11px] text-neutral-400">未核验</span>}
-                      </div>
-                      <p className="mt-1 whitespace-pre-wrap text-neutral-700 dark:text-neutral-300">“{evidence.quote}”</p>
-                    </div>
-                  ))}
-
-                  {innovation.search_hints.length > 0 && (
-                    <div className="flex flex-wrap gap-1 pt-1">
-                      {innovation.search_hints.map((hint) => (
-                        <span key={hint} className="rounded bg-neutral-100 px-1.5 py-0.5 font-mono text-[11px] text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300">
-                          {hint}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
             </div>
-          </div>
-        );
-      })}
+          );
+        })}
+      </div>
+      {!innovations.length && <p className="text-sm text-neutral-500">清单里还没有创新点。可在原文文本中划选添加目标。</p>}
+      <p className="mt-3 text-[11px] text-neutral-500">点标题阅读 · 勾选后定位</p>
+    </nav>
+  );
+}
 
+// 状态随条目身份重建，切换或删除当前条目时不会把草稿、展开状态带到下一条。
+export function PlanDetail({ active, onRename, onDelete, onOpenPaper, hasFinding }: DetailProps) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [evidenceOpen, setEvidenceOpen] = useState(false);
+  const difficulty = DIFFICULTY[active.difficulty];
+
+  return (
+    <div className="plan-detail">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        {editing ? (
+          // 改名框占满卡片内宽（w-full 换行独占一行）：曾经内联在标题行里，
+          // 长名字会把框撑出卡片边界，超出的部分被相邻卡片的背景盖住（用户实测反馈）
+          <input
+            autoFocus
+            aria-label="创新点名称"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onBlur={() => {
+              if (draft.trim() && draft.trim() !== active.name) onRename(active.id, draft.trim());
+              setEditing(false);
+            }}
+            onKeyDown={(event) => {
+              if (event.nativeEvent.isComposing) return;
+              if (event.key === "Enter") event.currentTarget.blur();
+              if (event.key === "Escape") setEditing(false);
+            }}
+            maxLength={120}
+            className="w-full rounded border border-neutral-300 px-1.5 py-0.5 text-sm dark:border-neutral-700"
+          />
+        ) : (
+          <h3 className="plan-detail-title text-xl font-semibold tracking-tight">{active.name}</h3>
+        )}
+        {active.source === "user" && (
+          <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[11px] text-blue-800 dark:bg-blue-950 dark:text-blue-200">
+            你添加的
+          </span>
+        )}
+        <span className="rounded bg-neutral-100 px-1.5 py-0.5 text-[11px] text-neutral-500 dark:bg-neutral-800">
+          {difficulty}
+        </span>
+        {!editing && (
+          <button
+            type="button"
+            onClick={() => {
+              setDraft(active.name);
+              setEditing(true);
+            }}
+            className="text-[11px] text-neutral-400 underline"
+          >
+            改名
+          </button>
+        )}
+        <button
+            type="button"
+            onClick={() => onDelete(active.id)}
+            className="text-[11px] text-red-500 underline"
+          >
+            删除
+          </button>
       </div>
 
-      {/* 这里原本还有一个「开始定位选中项」按钮，与第 4 节「代码仓库」里的按钮重复 →
-          已移除（定位需要先填仓库地址，动作应该只出现在填地址的那一节旁边）。 */}
-      <p className="text-[11px] text-neutral-500">
-        阶段 B：对每条选中的创新点，克隆仓库并让 Agent 自主探索，产出带 commit/文件/行号/片段哈希的代码引用，
-        再由后端从 git 对象里重放核验。找得到就给对照解读，找不到就明确写「未找到」。
-      </p>
+      <p className="mt-3 text-sm leading-relaxed text-neutral-700 dark:text-neutral-300">{active.one_liner}</p>
+
+      {!hasFinding && <div className="mt-4">
+        <button type="button" onClick={() => setEvidenceOpen((current) => !current)} aria-expanded={evidenceOpen} aria-controls={`plan-evidence-${active.id}`} className="text-xs text-teal-700 dark:text-teal-300">
+          {evidenceOpen ? "收起引文与关键词 ↑" : `展开引文与关键词（${active.paper_evidence.length} 条引文） ↓`}
+        </button>
+        <div id={`plan-evidence-${active.id}`} hidden={!evidenceOpen} className="mt-4 space-y-3">
+          <PaperEvidenceList evidence={active.paper_evidence} onOpenPaper={onOpenPaper} />
+          {active.search_hints.length > 0 && (
+            <div className="flex flex-wrap gap-1 pt-1">
+              {active.search_hints.map((hint) => (
+                <span
+                  key={hint}
+                  className="rounded bg-neutral-100 px-1.5 py-0.5 font-mono text-[11px] text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300"
+                >
+                  {hint}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>}
     </div>
   );
 }
