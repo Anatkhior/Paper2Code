@@ -538,6 +538,16 @@ def _artifact(run_id: str) -> dict[str, Any] | None:
     return store.read_json(store.run_dir(run_id) / "artifact.json")
 
 
+def _repo_info(run_id: str) -> dict[str, Any] | None:
+    """repo_ready 是当前克隆版本的事实来源，阶段结束前和重启回放后均可读取。"""
+    for event in reversed(_registry(run_id).bus.history):
+        if event["type"] == "repo_ready":
+            return event["data"]["repo"]
+        if event["type"] == "repo_cloning":
+            return None
+    return None
+
+
 def _chat_tools(run_id: str) -> tuple[list[Tool], PaperDocument | None, RepoSource | None]:
     """能查什么就给什么：有论文给论文工具，克隆过仓库给仓库工具。"""
     tools: list[Tool] = []
@@ -551,10 +561,9 @@ def _chat_tools(run_id: str) -> tuple[list[Tool], PaperDocument | None, RepoSour
         tools.extend(PAPER_TOOLS)
 
     repo_dir = directory / "repo"
-    artifact = _artifact(run_id) or {}
-    commit_sha = (artifact.get("run") or {}).get("repo", {}).get("commit_sha")
-    if (repo_dir / ".git").exists() and commit_sha:
-        repo = RepoSource(repo_dir, commit_sha)
+    repo_info = _repo_info(run_id)
+    if (repo_dir / ".git").exists() and repo_info:
+        repo = RepoSource(repo_dir, repo_info["commit_sha"])
         tools.extend(REPO_TOOLS)
 
     tools.append(FINISH)
@@ -656,16 +665,15 @@ async def post_chat(run_id: str, req: ChatRequest) -> dict[str, Any]:
 MAX_VIEW_LINES = 2000  # 阅读器要能一次看到整个文件（超长才截断）
 
 
-def _repo_for_run(run_id: str) -> RepoSource:
+def _repo_for_run(run_id: str) -> tuple[RepoSource, dict[str, Any]]:
     directory = store.run_dir(run_id)
     repo_dir = directory / "repo"
     if not (repo_dir / ".git").exists():
         raise HTTPException(status_code=409, detail="这个 run 还没有克隆仓库（先跑阶段 B 定位）")
-    artifact = store.read_json(directory / "artifact.json") or {}
-    commit_sha = (artifact.get("run") or {}).get("repo", {}).get("commit_sha")
-    if not commit_sha:
-        raise HTTPException(status_code=409, detail="产物里没有记录 commit，无法定位代码版本")
-    return RepoSource(repo_dir, commit_sha)
+    repo_info = _repo_info(run_id)
+    if not repo_info:
+        raise HTTPException(status_code=409, detail="仓库版本尚未就绪，请等待克隆完成")
+    return RepoSource(repo_dir, repo_info["commit_sha"]), repo_info
 
 
 def _source_url(repo_url: str | None, commit_sha: str, path: str, start: int, end: int) -> str | None:
@@ -689,7 +697,7 @@ async def run_file(
 ) -> dict[str, Any]:
     """读某个 commit 上的一段代码，带行号。前端"点开引用"就是打这个接口。"""
     _registry(run_id)
-    repo = _repo_for_run(run_id)
+    repo, repo_info = _repo_for_run(run_id)
 
     try:
         repo.resolve(path)  # 路径穿越检查（真正的读取走 git 对象，不碰工作区）
@@ -705,14 +713,18 @@ async def run_file(
     total = len(lines)
 
     first = max(1, start or 1)
+    # 先容纳完整引用，再分配上下文；超过视窗容量的引用从起始行展示。
+    if start is None and focus_start and (focus_end or focus_start) >= first + MAX_VIEW_LINES:
+        focus_length = max(1, (focus_end or focus_start) - focus_start + 1)
+        context_before = max(0, MAX_VIEW_LINES - focus_length) // 2
+        first = max(1, focus_start - context_before)
     requested_last = min(end or total, total)
     last = min(requested_last, first + MAX_VIEW_LINES - 1)
     truncated = last < requested_last  # 只有真的砍掉了内容才算截断
     if first > last:
         raise HTTPException(status_code=422, detail=f"行区间非法：start={first} > end={last}（文件共 {total} 行）")
 
-    artifact = store.read_json(store.run_dir(run_id) / "artifact.json") or {}
-    repo_url = (artifact.get("run") or {}).get("repo", {}).get("url")
+    repo_url = repo_info.get("url")
 
     return {
         "path": path,

@@ -91,18 +91,11 @@ export default function ChatPanel({
       <header className="flex flex-wrap items-center gap-2 border-b border-neutral-200 px-3 py-2 dark:border-neutral-800">
         <h2 className="text-sm font-semibold">追问</h2>
         <span className="text-[11px] text-neutral-500">
-          它可以自己去翻论文和代码（每条消息最多 8 次工具调用），回答里的代码位置会被机械核对
+          继续问原理、实现细节，或让它对照论文解释代码。
         </span>
       </header>
 
-      <div ref={scrollerRef} className="max-h-[52vh] space-y-3 overflow-auto p-3">
-        {turns.length === 0 && !streaming && (
-          <p className="text-sm text-neutral-500">
-            还没问过。已经帮你把整份分析结果（创新点、论文证据、代码引用、解释）放在它的上下文里，
-            可以直接问「这个 scaling 在哪用到」或「为什么 B 要置零」。
-          </p>
-        )}
-
+      <div ref={scrollerRef} hidden={turns.length === 0 && !streaming} className="max-h-[52vh] space-y-3 overflow-auto p-3">
         {turns.map((turn, index) => (
           <div key={`${turn.role}-${index}-${turn.ts ?? index}`} className={turn.role === "user" ? "text-right" : ""}>
             <div
@@ -162,29 +155,29 @@ export default function ChatPanel({
       </div>
 
       <div className="border-t border-neutral-200 p-3 dark:border-neutral-800">
-        {context && (
-          <div className="mb-2 flex items-center gap-2 text-[11px]">
-            <span className="rounded bg-blue-100 px-1.5 py-0.5 text-blue-800 dark:bg-blue-950 dark:text-blue-200">
-              针对 {context.id} · {context.name}
-            </span>
-            <button type="button" onClick={onClearContext} className="text-neutral-500 underline">
-              取消
-            </button>
-          </div>
-        )}
+        <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
+          <span className="min-w-0 break-words text-teal-800 dark:text-teal-200">
+            {context ? `针对 ${context.name}` : "针对整篇论文"}
+          </span>
+          <button type="button" onClick={onClearContext} className="min-h-8 rounded px-2 text-neutral-500 underline underline-offset-4">
+            {context ? "改问整篇论文" : "回到当前创新点"}
+          </button>
+        </div>
         <div className="flex gap-2">
           <textarea
+            aria-label="追问内容"
+            aria-describedby="chat-input-help"
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
+              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
                 event.preventDefault();
                 submit();
               }
             }}
             rows={2}
-            placeholder={disabled ? "先上传论文" : "问点什么…（Enter 发送，Shift+Enter 换行）"}
-            className="min-h-[52px] min-w-0 flex-1 resize-y rounded border border-neutral-300 bg-transparent px-2 py-1 text-sm dark:border-neutral-700"
+            placeholder="例如：这个 scaling 在哪里用到？"
+            className="min-h-[72px] min-w-0 flex-1 resize-y rounded border border-neutral-300 bg-transparent px-2 py-1 text-sm dark:border-neutral-700"
           />
           <button
             type="button"
@@ -195,6 +188,7 @@ export default function ChatPanel({
             {busy ? "回答中…" : "发送"}
           </button>
         </div>
+        <p id="chat-input-help" className="mt-2 text-[11px] text-neutral-500">{disabled ? "分析进行中，可先写好问题，结束后发送。" : "Enter 发送 · Shift+Enter 换行"}</p>
       </div>
     </section>
   );

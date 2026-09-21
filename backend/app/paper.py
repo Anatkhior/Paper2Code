@@ -285,6 +285,15 @@ class PaperDocument:
     def quote_rects(
         self, page: int, quote: str, *, max_rects: int = 40
     ) -> tuple[list[tuple[float, float, float, float]], float]:
+        """返回与 page_image / page_box 一致的、旋转后的页面坐标。"""
+        rects, coverage = self._quote_rects(page, quote, max_rects=max_rects)
+        rotation = self._open()[page - 1].rotation_matrix
+        # 匹配和合并依赖原始读序，只在输出边界旋转；crop 坐标已由 PyMuPDF 处理。
+        return [tuple(pymupdf.Rect(rect) * rotation) for rect in rects], coverage
+
+    def _quote_rects(
+        self, page: int, quote: str, *, max_rects: int
+    ) -> tuple[list[tuple[float, float, float, float]], float]:
         """在某一页里找出引文的位置（PDF 点坐标），并给出**覆盖率**。
 
         返回 (矩形列表, 覆盖率)；覆盖率 = 匹配到的词数 / 引文总词数。

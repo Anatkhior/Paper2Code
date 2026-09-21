@@ -156,8 +156,6 @@ export async function fetchFile(
 ): Promise<FileView> {
   const query = new URLSearchParams({
     path,
-    start: String(start),
-    end: String(end),
     focus_start: String(start),
     focus_end: String(end),
   });

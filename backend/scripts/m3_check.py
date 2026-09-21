@@ -320,7 +320,7 @@ async def section_b(check: Checker) -> None:
             "核心创新点": "创新点阅读区",
             "代码仓库": "阶段 B 输入区",
             "Agent 行动轨迹": "时间线",
-            "对照阅读器": "按需阅读器入口",
+            "对照阅读器": "常驻阅读器入口",
             "追问": "追问入口",
             "分析准备": "可收起的准备区",
         }
@@ -332,7 +332,7 @@ async def section_b(check: Checker) -> None:
         check("timeline-sidebar" in html and "sticky top-20" in html and "xl:block" in html,
               "宽屏保留常驻行动轨迹")
         check("xl:hidden" in html, "窄屏有内联行动轨迹")
-        check('class="reader-pane' not in html, "尚未选择引用时不渲染大面积空阅读器")
+        check('class="reader-pane' not in html, "上传前不渲染大面积空阅读器")
         check('id="analysis-setup"' in html, "准备区保留可访问的折叠控件")
     finally:
         server.terminate()
@@ -374,6 +374,13 @@ def build_hard_case_pdf(dest: Path) -> str:
 
 async def main() -> int:
     check = Checker("M3 验收")
+    geometry = subprocess.run(
+        [str(ROOT / ".venv/bin/python"), "-m", "unittest", "tests.test_paper_geometry", "tests.test_reader_repository"],
+        cwd=ROOT, capture_output=True, text=True, timeout=60,
+    )
+    check(geometry.returncode == 0, "阅读器回归：旋转/裁剪高亮与定位期间的仓库版本读取")
+    if geometry.returncode:
+        print(geometry.stdout + geometry.stderr, flush=True)
     mock = start_service("devtools.mock_provider:app", MOCK_PORT)
     app_proc = start_service(
         "app.main:app",

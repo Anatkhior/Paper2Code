@@ -78,15 +78,6 @@ export default function ComparePanel({ finding, missing, busy, selected, onOpenP
             ))}
           </div>
         )}
-        {!!explanation?.code_walkthrough?.length && <details className="reading-disclosure">
-          <summary>逐段讲解 <span className="font-normal text-neutral-500">{explanation.code_walkthrough.length} 段</span></summary>
-          <ol className="walkthrough-list mt-4 space-y-4">
-            {explanation.code_walkthrough.map((step, index) => <li key={index} className="flex gap-3">
-              <span className="pt-0.5 font-mono text-xs text-neutral-400">{String(index + 1).padStart(2, "0")}</span>
-              <div className="min-w-0 flex-1"><code className="text-xs text-neutral-500">{step.line_ref}</code><div className="mt-1"><Markdown text={step.text ?? ""} /></div></div>
-            </li>)}
-          </ol>
-        </details>}
       </section>
 
       <details className="reading-disclosure">

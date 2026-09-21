@@ -7,7 +7,8 @@ import ComparePanel from "@/components/ComparePanel";
 import CoverageCard from "@/components/CoverageCard";
 import PlanList, { PlanDetail } from "@/components/PlanList";
 import ProviderForm from "@/components/ProviderForm";
-import Reader, { type CodePane, type PaperPane } from "@/components/Reader";
+import Reader from "@/components/Reader";
+import { useReader } from "@/lib/useReader";
 import Timeline from "@/components/Timeline";
 import {
   addPlanItem,
@@ -16,8 +17,6 @@ import {
   deletePlanItem,
   eventsUrl,
   fetchChat,
-  fetchFile,
-  fetchPaperPage,
   fetchPlan,
   healthUrl,
   paperPageImageUrl,
@@ -53,7 +52,7 @@ type Phase = "idle" | "uploading" | "recon" | "locate" | "done" | "error";
 export default function Home() {
   const [chatTurns, setChatTurns] = useState<ChatTurn[]>([]);
   const [chatBusy, setChatBusy] = useState(false);
-  const [chatContext, setChatContext] = useState<{ id: string; name: string } | null>(null);
+  const [chatScope, setChatScope] = useState<"current" | "all">("current");
   const chatRef = useRef<HTMLDivElement>(null);
 
   const [notice, setNotice] = useState<string | null>(null);
@@ -95,25 +94,26 @@ export default function Home() {
     eventsRef.current = events;
   }, [events]);
 
-  // ---- 双栏阅读器：左论文原文、右代码实现 ----
-  const [paperPane, setPaperPane] = useState<PaperPane | null>(null);
-  const [codePane, setCodePane] = useState<CodePane | null>(null);
+  // 阅读区始终跟随当前创新点；点击具体引用只覆盖当前条目的阅读目标。
   const readerRef = useRef<HTMLDivElement>(null);
   const [setupOpen, setSetupOpen] = useState(true);
-  const [readerOpen, setReaderOpen] = useState(false);
-  const [chatOpen, setChatOpen] = useState(false);
+  const [readerOpen, setReaderOpen] = useState(true);
+  const [readerTab, setReaderTab] = useState<"paper" | "code">("paper");
   const [activeId, setActiveId] = useState("");
   const activeInnovation = plan?.innovations.find((item) => item.id === activeId) ?? plan?.innovations[0];
-  const paperRequest = useRef(0);
-  const codeRequest = useRef(0);
-
-  const clearReader = useCallback(() => {
-    paperRequest.current += 1;
-    codeRequest.current += 1;
-    setPaperPane(null);
-    setCodePane(null);
-    setReaderOpen(false);
-  }, []);
+  const findings = useMemo<Finding[]>(
+    () => Array.from(new Map(events
+      .filter((event) => event.type === "finding")
+      .map((event) => {
+        const finding = event.data.finding as Finding;
+        return [finding.id, finding] as const;
+      })).values()).filter((finding) => plan?.innovations.some((item) => item.id === finding.id)),
+    [events, plan],
+  );
+  const activeFinding = findings.find((finding) => finding.id === activeInnovation?.id);
+  const chatContext = useMemo(() => chatScope === "current" && activeInnovation ? { id: activeInnovation.id, name: activeInnovation.name } : null, [chatScope, activeInnovation]);
+  const repoVersion = useMemo(() => [...events].reverse().find((event) => event.type === "repo_ready")?.id ?? 0, [events]);
+  const { paperPane, codePane, selectPaper, selectCode, reset: clearReader } = useReader(runId, activeInnovation, activeFinding, repoVersion);
 
   const activateInnovation = (id: string) => {
     if (id === activeInnovation?.id) return;
@@ -126,62 +126,22 @@ export default function Home() {
     requestAnimationFrame(() => readerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
   }, []);
 
-  const openPaper = useCallback(
-    async (page: number, quote: string) => {
-      if (!runId) return;
-      const request = ++paperRequest.current;
-      setPaperPane({ page, quote, loading: true, error: null });
-      scrollToReader();
-      try {
-        // 带上引文：后端会返回"引文在这一页上的高亮矩形"，原版页面据此叠高亮框
-        const view = await fetchPaperPage(runId, page, quote);
-        if (request !== paperRequest.current) return;
-        setPaperPane({
-          page,
-          quote,
-          text: view.text,
-          pageCount: view.page_count,
-          pageWidth: view.page_width,
-          pageHeight: view.page_height,
-          rects: view.highlight_rects ?? [],
-          coverage: view.highlight_coverage ?? null,
-          loading: false,
-          error: null,
-        });
-      } catch (caught) {
-        if (request === paperRequest.current) setPaperPane({ page, quote, loading: false, error: String(caught) });
-      }
-    },
-    [runId, scrollToReader],
-  );
+  const openPaper = (page: number, quote: string) => {
+    selectPaper({ page, quote });
+    setReaderTab("paper");
+    scrollToReader();
+  };
 
-  const openCode = useCallback(
-    async (path: string, start: number, end: number, why: string) => {
-      if (!runId) return;
-      const request = ++codeRequest.current;
-      setCodePane({ path, start, end, why, lines: [], loading: true, error: null });
-      scrollToReader();
-      try {
-        const view = await fetchFile(runId, path, start, end);
-        if (request !== codeRequest.current) return;
-        setCodePane({
-          path: view.path,
-          start: view.line_start,
-          end: view.line_end,
-          why,
-          lines: view.lines,
-          total: view.total_lines,
-          commit: view.commit_sha,
-          sourceUrl: view.source_url,
-          loading: false,
-          error: null,
-        });
-      } catch (caught) {
-        if (request === codeRequest.current) setCodePane({ path, start, end, why, lines: [], loading: false, error: String(caught) });
-      }
-    },
-    [runId, scrollToReader],
-  );
+  const openCode = (path: string, start: number, end: number, why: string) => {
+    selectCode({ path, start, end, why });
+    setReaderTab("code");
+    scrollToReader();
+  };
+
+  const focusChat = useCallback(() => {
+    chatRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
+    chatRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
 
   // ---- 后端健康检查 + 恢复上次填的 provider（**默认不恢复 api_key**）----
   useEffect(() => {
@@ -262,13 +222,14 @@ export default function Home() {
     eventsRef.current = [];
     clearReader();
     setActiveId("");
-    setChatOpen(false);
+    setReaderOpen(true);
+    setReaderTab("paper");
     setSelected(new Set());
     autoSelectedRef.current = false;
     setPlan(null);
     setNotice(null);
     setChatTurns([]);
-    setChatContext(null);
+    setChatScope("current");
     setPaper(null);
     setRunId(null);
     try {
@@ -439,11 +400,11 @@ export default function Home() {
     [runId, provider, chatContext, openStream, refreshChat],
   );
 
-  const askAbout = useCallback((id: string, name: string) => {
-    setChatContext({ id, name });
-    setChatOpen(true);
-    requestAnimationFrame(() => chatRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
-  }, []);
+  const askAbout = (id: string) => {
+    activateInnovation(id);
+    setChatScope("current");
+    focusChat();
+  };
 
   /** 在原文里划选一段 → 变成一个定位目标 */
   const addTarget = useCallback(
@@ -499,7 +460,7 @@ export default function Home() {
         setError(String(caught));
       }
     },
-    [runId, activeInnovation?.id, clearReader],
+    [runId, activeInnovation, clearReader],
   );
 
   useEffect(() => {
@@ -514,15 +475,6 @@ export default function Home() {
     }
   }, [plan]);
 
-  const findings = useMemo<Finding[]>(
-    () => Array.from(new Map(events
-      .filter((event) => event.type === "finding")
-      .map((event) => {
-        const finding = event.data.finding as Finding;
-        return [finding.id, finding] as const;
-      })).values()).filter((finding) => plan?.innovations.some((item) => item.id === finding.id)),
-    [events, plan],
-  );
   const verification = useMemo<VerificationSummary | null>(() => {
     const done = [...events].reverse().find((event) => event.type === "verification_done");
     return (done?.data.summary as VerificationSummary) ?? null;
@@ -577,7 +529,6 @@ export default function Home() {
     !provider.api_key && "在「模型设置」中填 api_key",
   ].filter(Boolean) as string[];
 
-  const activeFinding = findings.find((finding) => finding.id === activeInnovation?.id);
   const phaseLabel = { idle: "准备论文与仓库", uploading: "正在上传论文", recon: "正在侦察论文", locate: "正在定位代码", done: "本轮已结束", error: "运行出错" }[phase];
 
   return (
@@ -603,6 +554,7 @@ export default function Home() {
         <span className={`h-2 w-2 rounded-full ${busy ? "animate-pulse bg-teal-500" : phase === "error" ? "bg-red-500" : "bg-neutral-400"}`} />
         <span role="status" className="text-sm font-medium">{phaseLabel}</span>
         {plan && <span className="text-xs text-neutral-500">{plan.innovations.length} 条创新点 · {findings.length} 条结论</span>}
+        {runId && <nav aria-label="阅读快捷入口" className="flex gap-3 text-xs text-teal-700 dark:text-teal-300"><button type="button" onClick={scrollToReader}>原文与代码</button><button type="button" onClick={focusChat}>追问</button></nav>}
         <button type="button" onClick={toggleTimeline} aria-expanded={timelineOpen} aria-controls="run-timeline run-timeline-sidebar" className="ml-auto text-xs text-neutral-500">{timelineOpen ? "收起轨迹" : "展开行动轨迹"} · {events.length}</button>
       </div>
 
@@ -649,7 +601,7 @@ export default function Home() {
               <h2 className="text-sm font-semibold">核心创新点 {plan && <span className="ml-1 font-normal text-neutral-500">{plan.innovations.length} 条</span>}</h2>
               <div className="ml-auto flex gap-4 text-xs text-teal-700 dark:text-teal-300">
                 {runId && <button type="button" onClick={() => openPaper(1, "")}>浏览论文 / 划选目标 ↗</button>}
-                {runId && <button type="button" onClick={() => { setChatOpen(true); requestAnimationFrame(() => chatRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })); }}>追问 ↗</button>}
+                {runId && <button type="button" onClick={focusChat}>追问 ↗</button>}
               </div>
             </header>
             {plan ? <>
@@ -668,17 +620,18 @@ export default function Home() {
             </> : <p className="px-5 py-8 text-sm text-neutral-500">{busy ? "正在阅读论文，创新点清单将在这里出现。" : "上传论文并开始侦察，在这里逐条阅读创新点及对应实现。"}</p>}
           </section>
 
-          <section ref={readerRef} hidden={!readerOpen} className="scroll-mt-20" aria-label="对照阅读器">
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <h2 className="text-sm font-semibold">对照阅读器 <span className="ml-2 text-xs font-normal text-neutral-500">原文与代码按引用打开</span></h2>
-              <button type="button" onClick={() => setReaderOpen(false)} className="text-xs text-neutral-500">收起阅读器 ↑</button>
+          <section ref={readerRef} className="scroll-mt-24" aria-label="对照阅读器">
+            <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-sm font-semibold">对照阅读器 <span className="ml-2 text-xs font-normal text-neutral-500">{activeInnovation ? `当前：${activeInnovation.name}` : "原文与代码"}</span></h2>
+              {runId && <button type="button" onClick={() => setReaderOpen(!readerOpen)} aria-expanded={readerOpen} aria-controls="reader-content" className="min-h-9 shrink-0 rounded px-2 text-xs text-teal-700 hover:bg-teal-50 dark:text-teal-300 dark:hover:bg-teal-950">{readerOpen ? "收起阅读器 ↑" : "展开阅读器 ↓"}</button>}
             </div>
-            {readerOpen && <Reader left={paperPane} right={codePane} pdfUrl={runId ? pdfUrl(runId) : null} pageImageUrl={runId ? (page: number) => paperPageImageUrl(runId, page) : null} onGoToPage={(page) => openPaper(page, "")} onSelectTarget={addTarget} />}
+            <div id="reader-content" hidden={!readerOpen}>
+              {runId ? <Reader left={paperPane} right={codePane} walkthrough={activeFinding?.explanation.code_walkthrough} onOpenCode={openCode} activeTab={readerTab} onTabChange={setReaderTab} codeEmpty={phase === "locate" ? "正在定位代码，找到实现后会自动显示。" : activeFinding ? "这条创新点暂无可展示的代码引用。" : "开始定位后，这里会自动显示当前创新点的代码。"} pdfUrl={pdfUrl(runId)} pageImageUrl={(page: number) => paperPageImageUrl(runId, page)} onGoToPage={(page) => selectPaper({ page, quote: "" })} onSelectTarget={addTarget} /> : <p className="text-xs text-neutral-500">上传论文后，在这里对照原文与实现。</p>}
+            </div>
           </section>
 
-          <div ref={chatRef} hidden={!chatOpen} className="scroll-mt-20">
-            <button type="button" onClick={() => setChatOpen(false)} className="mb-2 text-xs text-neutral-500">收起追问 ↑</button>
-            <ChatPanel turns={chatTurns} streaming={chatStreaming} busy={chatBusy} context={chatContext} onClearContext={() => setChatContext(null)} onSend={sendChat} disabled={!runId || busy} onOpenCitation={(path, start, end) => openCode(path, start, end, "来自追问对话")} />
+          <div ref={chatRef} hidden={!runId} className="scroll-mt-24">
+            <ChatPanel key={runId} turns={chatTurns} streaming={chatStreaming} busy={chatBusy} context={chatContext} onClearContext={() => setChatScope(chatScope === "current" ? "all" : "current")} onSend={sendChat} disabled={!runId || busy} onOpenCitation={(path, start, end) => openCode(path, start, end, "来自追问对话")} />
           </div>
 
           {runEnd && <details className="rounded-lg border border-neutral-200 dark:border-neutral-800">

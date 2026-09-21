@@ -259,6 +259,14 @@ async def section_c(check: Checker) -> None:
         check(False, "前端依赖或 pnpm 不可用")
         return
 
+    syntax = subprocess.run(
+        ["node", "--test", "lib/syntax.test.mjs", "lib/codeAnnotations.test.mjs"],
+        cwd=FRONTEND, capture_output=True, text=True, timeout=60,
+    )
+    check(syntax.returncode == 0, "代码着色保留原文，行内讲解正确映射且不丢失异常引用")
+    if syntax.returncode:
+        print(syntax.stdout + syntax.stderr, flush=True)
+
     build = subprocess.run(
         ["pnpm", "build"], cwd=FRONTEND, env=frontend_env(), capture_output=True, text=True, timeout=600
     )
@@ -355,10 +363,10 @@ async def section_c(check: Checker) -> None:
               "空清单提示与选择操作保留")
         check(any("未产出这条结论" in text and "未找到实现" in text for text in texts),
               "缺失结论与未找到实现分别展示")
-        check(any("reading-disclosure" in text and "逐段讲解" in text for text in texts),
-              "较长的逐段讲解按需展开")
+        check(any("code-annotation" in text and "非仓库原文" in text for text in texts),
+              "逐段讲解嵌入代码阅读器并标明非仓库原文")
         check(any("以此为目标定位代码" in text and "划选一段原文" in text for text in texts),
-              "按需阅读器保留划选添加目标")
+              "常驻阅读器保留划选添加目标")
         check("innovation-tabs" in css_text and "innovation-tab-title" in css_text,
               "完整目录及长标题换行样式进入 CSS")
         check("--reading-active" in css_text and "prefers-color-scheme:dark" in css_text,
