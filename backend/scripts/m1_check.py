@@ -715,7 +715,56 @@ async def section_h(check: Checker, client: httpx.AsyncClient) -> None:
         delays == [5.0, 10.0, 20.0, 40.0],
         f"瞬时故障的退避比限流更快起跳（{delays}）——抖动通常几秒内恢复",
     )
-    providers_module.reset_llm_pacing()
+
+    # ---- ④ 重试不能失控（2026-09-26 审查修复）----
+    # (a) 错误文本里带 unrecognized 就去掉 stream_options 重发——原来没有次数限制，
+    #     端点对别的参数回 "Unrecognized request argument"（Azure 风格）时会无限立即重发。
+    # (b) 请求阶段的瞬时故障由内层重试；外层原来又按「没收到内容」再重试一遍，次数相乘。
+    real_acompletion = providers_module.litellm.acompletion
+    real_delay = providers_module._retry_delay
+    calls: list[dict[str, Any]] = []
+
+    async def _unrecognized(**kwargs: Any) -> Any:
+        calls.append(dict(kwargs))
+        raise _FakeError("Unrecognized request argument supplied: tool_choice", 400)
+
+    async def _down(**kwargs: Any) -> Any:
+        calls.append(dict(kwargs))
+        raise _FakeError("OpenAIException - Connection error.", 500)
+
+    try:
+        providers_module.reset_llm_pacing()
+        providers_module._retry_delay = lambda *args, **kwargs: 0.0
+        providers_module.litellm.acompletion = _unrecognized
+        outcome = "没有抛错"
+        try:
+            await asyncio.wait_for(
+                providers_module._completion_with_retries(
+                    {"model": "openai/x", "stream_options": {"include_usage": True}}, None
+                ),
+                timeout=10,
+            )
+        except asyncio.TimeoutError:
+            outcome = "超时（死循环）"
+        except _FakeError:
+            outcome = "如实报错"
+        check(
+            outcome == "如实报错" and len(calls) == 2 and "stream_options" not in calls[-1],
+            f"「unrecognized」只触发一次去掉 stream_options 的回退（{outcome}，共请求 {len(calls)} 次）",
+        )
+
+        calls.clear()
+        providers_module.litellm.acompletion = _down
+        down_cfg = providers_module.ProviderConfig(**provider("mock-model"))
+        try:
+            await providers_module.stream_turn(down_cfg, [{"role": "user", "content": "hi"}], None, retries=2)
+        except Exception:  # noqa: BLE001
+            pass
+        check(len(calls) == 3, f"端点宕机时单轮请求数 = 重试上限 + 1（{len(calls)} 次，原来两层相乘是 9 次）")
+    finally:
+        providers_module.litellm.acompletion = real_acompletion
+        providers_module._retry_delay = real_delay
+        providers_module.reset_llm_pacing()
 
 
 async def main() -> int:

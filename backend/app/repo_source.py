@@ -588,6 +588,8 @@ def _cache_entry(url: str, sha: str) -> Path:
     （否则旧的全量条目会被当成源码视图复用，体积照旧）。
     """
     strategy = "sparse" if settings.repo_sparse else "full"
+    # nosymlink：2026-09-26 起克隆带 core.symlinks=false，旧条目里可能还有真的符号链接，不复用
+    strategy += "|nosymlink"
     key = hashlib.sha256(
         f"{_normalize_repo_url(url)}|{sha}|{strategy}".encode("utf-8")
     ).hexdigest()[:16]
@@ -1018,7 +1020,7 @@ def unreadable_heavy_files(root: Path, *, top: int = 3, min_bytes: int = 1024 * 
     """
     found: list[tuple[int, str]] = []
     for path in root.rglob("*"):
-        if not path.is_file() or ".git" in path.parts:
+        if path.is_symlink() or not path.is_file() or ".git" in path.parts:
             continue
         try:
             size = path.stat().st_size
@@ -1042,6 +1044,9 @@ def _clone_command(url: str, dest: Path, *, sparse: bool, partial: bool) -> list
         "--single-branch",
         "--no-tags",
         "--no-recurse-submodules",       # submodule 可以在 checkout 时执行任意代码
+        # 符号链接检出成"内容是链接目标"的普通文件：和 git 对象里存的一致（核验能重放），
+        # 也就不会有 `notes.py -> ../../../.env` 这种链接把读取引到仓库外面去
+        "--config", "core.symlinks=false",
     ]
     if sparse:
         args.append("--sparse")
@@ -1134,7 +1139,7 @@ def _measure(root: Path) -> tuple[int, int, int, bool]:
     git_bytes = 0
     truncated = False
     for path in root.rglob("*"):
-        if not path.is_file():
+        if path.is_symlink() or not path.is_file():   # 不跟随链接去量仓库外的文件
             continue
         try:
             size = path.stat().st_size
@@ -1189,6 +1194,82 @@ def text_lines(content: str) -> list[str]:
     return content.replace("\r\n", "\n").replace("\r", "\n").splitlines()
 
 
+def _walk_files(base: Path):
+    """按确定顺序（与 sorted(rglob) 相同的深度优先序）逐个产出 base 下的普通文件。
+
+    - 不进 SKIP_DIRS（先剪枝，而不是全列出来再过滤）；
+    - **文件和目录的符号链接都不跟随**：仓库内容是不可信输入，`notes.py -> ../../../.env`
+      会让"搜仓库"变成"读宿主机文件"；而且链接读出来的内容 git 对象重放不出来。
+    - 是生成器：调用方可以边走边计数/计时，超预算就停，并知道自己"没走完"。
+    """
+
+    def entries(directory: Path) -> list[os.DirEntry]:
+        try:
+            with os.scandir(directory) as iterator:
+                return sorted(iterator, key=lambda entry: entry.name)
+        except OSError:
+            return []
+
+    stack = [iter(entries(base))]
+    while stack:
+        entry = next(stack[-1], None)
+        if entry is None:
+            stack.pop()
+            continue
+        if entry.is_symlink():
+            continue
+        if entry.is_dir(follow_symlinks=False):
+            if entry.name not in SKIP_DIRS:
+                stack.append(iter(entries(Path(entry.path))))
+        elif entry.is_file(follow_symlinks=False):
+            yield Path(entry.path)
+
+
+def _glob_regex(pattern: str) -> re.Pattern[str]:
+    """把 search_code 的 glob 翻译成正则，匹配**相对仓库根目录**的路径。
+
+    语义与 .gitignore / ripgrep 一致：不含 `/` 的模式（`*.py`）匹配任意深度的文件名；
+    含 `/` 的从仓库根算起；`**/` 匹配零到多层目录，`*`、`?` 不跨目录。
+    原来用 `PurePath.match`：从右往左对齐且不认 `**`，于是 `loralib/**/*.py`
+    匹配不到 `loralib/layers.py`，`src/*.py` 反而会命中 `vendor/x/src/a.py`。
+    """
+    text = pattern.strip()
+    while text.startswith("./"):
+        text = text[2:]
+    if text.endswith("/"):
+        text += "**"                        # 目录模式：目录下的全部文件
+    anchored = "/" in text
+    text = text.lstrip("/")
+    parts: list[str] = []
+    index = 0
+    while index < len(text):
+        if text.startswith("**/", index):
+            parts.append("(?:.*/)?")
+            index += 3
+        elif text.startswith("**", index):
+            parts.append(".*")
+            index += 2
+        elif text[index] == "*":
+            parts.append("[^/]*")
+            index += 1
+        elif text[index] == "?":
+            parts.append("[^/]")
+            index += 1
+        elif text[index] == "[" and "]" in text[index + 2 :]:
+            end = text.index("]", index + 2)
+            body = text[index + 1 : end].replace("\\", "\\\\")
+            parts.append("[" + ("^" + body[1:] if body.startswith("!") else body) + "]")
+            index = end + 1
+        else:
+            parts.append(re.escape(text[index]))
+            index += 1
+    prefix = "" if anchored else "(?:.*/)?"
+    try:
+        return re.compile(prefix + "".join(parts))
+    except re.error as exc:
+        raise RepoError(f"glob 不合法：{pattern}（{exc}）") from exc
+
+
 class RepoSource:
     """按需读取一个已克隆的仓库。**只读，不执行任何东西。**"""
 
@@ -1204,9 +1285,14 @@ class RepoSource:
             raise RepoError("路径不能以 - 开头")
         if "\0" in relative:
             raise RepoError("路径里不能有 NUL 字节")
-        target = (self.root / relative).resolve()
+        lexical = Path(os.path.normpath(self.root / relative))
+        target = lexical.resolve()
         if target != self.root and self.root not in target.parents:
             raise RepoError(f"路径越界：{relative} 不在仓库目录内")
+        if target != lexical:
+            # 仓库内的链接也不跟随：git 对象里存的只是链接目标路径，
+            # 读链接目标得到的内容，核验时 `git show` 重放不出来
+            raise RepoError(f"{relative} 经过符号链接，不跟随（请直接读链接指向的那个文件）")
         return target
 
     def rel(self, path: Path) -> str:
@@ -1217,12 +1303,10 @@ class RepoSource:
         base = self.resolve(subdir) if subdir else self.root
         if base.is_file():
             return [base]
+        if any(part in SKIP_DIRS for part in base.relative_to(self.root).parts):
+            return []
         out: list[Path] = []
-        for path in sorted(base.rglob("*")):
-            if not path.is_file():
-                continue
-            if any(part in SKIP_DIRS for part in path.relative_to(self.root).parts[:-1]):
-                continue
+        for path in _walk_files(base):
             out.append(path)
             if len(out) >= limit:
                 break
@@ -1241,13 +1325,13 @@ class RepoSource:
                 continue
             if len(relative_parts) - root_depth > depth:
                 continue
-            rows.append(
-                {
-                    "path": path.relative_to(self.root).as_posix(),
-                    "type": "dir" if path.is_dir() else "file",
-                    "size": path.stat().st_size if path.is_file() else None,
-                }
-            )
+            if path.is_symlink():
+                kind, size = "symlink", None    # 不跟随：不暴露链接目标的类型与大小
+            elif path.is_dir():
+                kind, size = "dir", None
+            else:
+                kind, size = "file", path.stat().st_size if path.is_file() else None
+            rows.append({"path": path.relative_to(self.root).as_posix(), "type": kind, "size": size})
             if len(rows) >= max_rows:
                 truncated = True
                 break
@@ -1313,23 +1397,26 @@ class RepoSource:
         scanned = 0
         truncated_files = False
         timed_out = False
+        path_filter = None if glob.strip() in {"", "*", "**", "**/*"} else _glob_regex(glob)
 
-        for path in self.iter_files(limit=MAX_SEARCH_FILES):
-            relative = self.rel(path)
-            if glob not in {"**/*", "*"} and not path.match(glob):
-                continue
-            if path.suffix.lower() in BINARY_SUFFIXES:
-                continue
-            scanned += 1
-            if scanned > MAX_SEARCH_FILES:
-                truncated_files = True
-                break
+        # 先按 glob/后缀过滤、再计数：原来是先截前 4000 个文件再过滤，而且截断永远不会被标出来
+        # ——仓库文件多于 4000 时只扫了一部分，却回报"扫完了整个仓库"，模型据此报 not_found。
+        for path in _walk_files(self.root):
             if time.monotonic() - started > MAX_SEARCH_SECONDS:
                 timed_out = True
                 break
-            if path.stat().st_size > MAX_TEXT_FILE_BYTES or not is_probably_text(path):
+            relative = self.rel(path)
+            if path_filter is not None and not path_filter.fullmatch(relative):
                 continue
+            if path.suffix.lower() in BINARY_SUFFIXES:
+                continue
+            if scanned >= MAX_SEARCH_FILES:
+                truncated_files = True            # 还有候选文件没扫到
+                break
+            scanned += 1
             try:
+                if path.stat().st_size > MAX_TEXT_FILE_BYTES or not is_probably_text(path):
+                    continue
                 for number, line in enumerate(
                     path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1
                 ):
@@ -1351,7 +1438,7 @@ class RepoSource:
                 "搜索被截断（达到命中数/文件数/时间上限之一），"
                 "所以'没找到'不等于'不存在'，换个更精确的模式再来一次。"
                 if (truncated_files or timed_out or len(hits) >= max_hits)
-                else "本次搜索扫完了整个仓库（跳过依赖与二进制文件）。"
+                else "本次搜索扫完了整个仓库（跳过依赖目录、二进制文件与符号链接）。"
             ),
         }
 

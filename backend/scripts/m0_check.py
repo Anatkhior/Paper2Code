@@ -194,6 +194,30 @@ async def main() -> int:
                 "端点探测请求带同一个 User-Agent",
             )
 
+            # ---- 模型名本身带 / 的端点（2026-09-26 审查修复）----
+            # OpenRouter 的 anthropic/claude-…、SiliconFlow 的 Qwen/…、vLLM 的 HF 模型名都带 /。
+            # 原来"带 / 就当成 litellm 前缀"：Qwen 报 provider 不存在，anthropic/… 被改走 Anthropic 协议。
+            import litellm
+
+            def _routed(protocol: str, base_url: str | None, model: str) -> tuple[str, str]:
+                cfg = ProviderConfig(protocol=protocol, base_url=base_url, api_key="k", model=model)
+                sent, routed_provider, *_ = litellm.get_llm_provider(cfg.litellm_model(), api_base=base_url)
+                return routed_provider, sent
+
+            check(
+                _routed("openai-compatible", "https://api.siliconflow.cn/v1", "Qwen/Qwen2.5-72B-Instruct")
+                == ("openai", "Qwen/Qwen2.5-72B-Instruct")
+                and _routed("openai-compatible", "https://openrouter.ai/api/v1", "anthropic/claude-3.5-sonnet")
+                == ("openai", "anthropic/claude-3.5-sonnet"),
+                "带 base_url 的 openai-compatible：带 / 的模型名走 OpenAI 协议、原样发给端点",
+            )
+            check(
+                _routed("openai-compatible", None, "deepseek/deepseek-chat") == ("deepseek", "deepseek-chat")
+                and _routed("anthropic", "https://api.anthropic.com", "claude-sonnet-4-6")
+                == ("anthropic", "claude-sonnet-4-6"),
+                "不填 base_url 时仍认 litellm 原生前缀；Anthropic 协议不受影响",
+            )
+
             # _probe_urls 是纯函数：base 带 /v1 时只有一个候选（曾经会把同一个 URL 探测两遍），
             # 不带 /v1 时补一个 /v1 候选（"漏了 /v1"是最常见的 base_url 手误）。
             with_v1 = _probe_urls("https://api.example.com/v1")

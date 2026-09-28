@@ -193,6 +193,20 @@ async def section_a(check: Checker, client: httpx.AsyncClient) -> str:
     after_patch = await client.patch(f"/api/runs/{run_id}/plan/items/user-2", json={"name": "结束后改名"})
     check(after_patch.status_code == 200, "阶段结束后恢复正常编辑")
 
+    # ---- 侦察失败不能清空清单（2026-09-26 审查修复，已复现）----
+    # 原来侦察结束时无条件把 run 摘要写进 plan.json：没调成 record_plan（额度用尽 / 401 /
+    # 预算耗尽）时 plan=None，用户划选加的目标和上一版清单全部丢失，之后定位直接 409。
+    before_ids = [item["id"] for item in (await client.get(f"/api/runs/{run_id}/plan")).json()["plan"]["innovations"]]
+    baseline = await current_max_event_id(client, run_id)
+    failed = await client.post(f"/api/runs/{run_id}/recon", json={"provider": provider("quota-exhausted")})
+    check(failed.status_code == 200, "额度用尽的侦察已启动（会立刻失败、不交清单）")
+    failed_events, _, _ = await collect_sse(client, f"/api/runs/{run_id}/events?from_id={baseline}", since_id=baseline)
+    failed_end = [event for event in failed_events if event["type"] == "run_end"]
+    check(bool(failed_end) and failed_end[0]["data"]["status"] == "failed", "这次侦察如实失败")
+    kept = (await client.get(f"/api/runs/{run_id}/plan")).json()["plan"]
+    kept_ids = [item["id"] for item in (kept or {}).get("innovations", [])]
+    check(kept_ids == before_ids, f"侦察失败后清单原样保留（{kept_ids}）")
+
     return run_id
 
 

@@ -107,7 +107,13 @@ REPO_TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "pattern": {"type": "string", "description": "正则表达式，例如 'class .*LoRA' 或 'lora_alpha'"},
-                "glob": {"type": "string", "description": "限定文件，例如 '**/*.py'（默认全部）"},
+                "glob": {
+                    "type": "string",
+                    "description": (
+                        "限定文件（相对仓库根目录）：'*.py' 匹配任意深度的 .py，"
+                        "'loralib/**/*.py' 只看 loralib 下，默认全部"
+                    ),
+                },
             },
             "required": ["pattern"],
             "additionalProperties": False,

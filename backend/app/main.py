@@ -242,7 +242,13 @@ async def start_recon(run_id: str, req: ReconRequest) -> dict[str, Any]:
             )
         finally:
             doc.close()
-        store.write_json(directory / "plan.json", run.summary or {})
+        summary = dict(run.summary or {})
+        if summary.get("plan") is None:
+            # 这次侦察没交出清单（失败 / 预算用尽 / 模型没调用 record_plan）：
+            # 不能拿空清单覆盖 plan.json——里面可能有用户划选加的目标和上一版清单。
+            previous = store.read_json(directory / "plan.json") or {}
+            summary["plan"] = previous.get("plan")
+        store.write_json(directory / "plan.json", summary)
 
     run.task = asyncio.create_task(_job())
     return {"run_id": run_id, "phase": "recon", "started": True}

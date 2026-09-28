@@ -44,7 +44,7 @@ from .harness import (
 )
 
 from tests.paper_fixture import ensure_fixtures
-from tests.repo_fixture import build_mini_repo, build_repo, layer_lines, quote_from_lines
+from tests.repo_fixture import build_mini_repo, build_repo, commit_all, layer_lines, quote_from_lines
 
 
 async def expect_error(check: Checker, thunk: Any, message: str, contains: str = "") -> None:
@@ -69,6 +69,7 @@ async def section_a(check: Checker) -> dict[str, Any]:
     from app.config import settings
     from app.events import RunBus
     from app.repo_source import (
+        MAX_SEARCH_FILES,
         AddressFinding,
         RepoError,
         RepoSource,
@@ -600,6 +601,87 @@ async def section_a(check: Checker) -> dict[str, Any]:
     (binary_dir / "weights.pt").write_bytes(b"\x00\x01\x02binary")
     binary_repo = RepoSource(binary_dir, "deadbeef")
     await expect_error(check, lambda: binary_repo.read_file("weights.pt"), "二进制文件被拒绝", "二进制")
+
+    # ---- 符号链接（2026-09-26 审查修复）：仓库内容是不可信输入，链接一律不跟随 ----
+    # 克隆目录在 data/<run>/repo，`notes.py -> ../../../.env` 正好指到 backend/.env。
+    # 修复前 read_file 会拦，但 search_code 会把仓库外文件的内容搜出来（已复现）。
+    outside_dir = work / "outside"
+    outside_dir.mkdir(exist_ok=True)
+    (outside_dir / "secret.txt").write_text("SYMLINK_CANARY=outside-repo\n", encoding="utf-8")
+    raw_links = work / "symlink-raw"
+    (raw_links / "pkg").mkdir(parents=True, exist_ok=True)
+    (raw_links / "pkg" / "real.py").write_text("value = 1\n", encoding="utf-8")
+    (raw_links / "notes.py").symlink_to("../outside/secret.txt")
+    (raw_links / "abs.py").symlink_to(outside_dir / "secret.txt")
+    (raw_links / "inner.py").symlink_to("pkg/real.py")
+    (raw_links / "linkdir").symlink_to(outside_dir, target_is_directory=True)
+    linked = RepoSource(raw_links, "deadbeef")
+    canary = linked.search("SYMLINK_CANARY")
+    check(
+        not canary["hits"] and canary["complete"] is True,
+        "search_code 不跟随符号链接：指向仓库外的链接（相对/绝对/目录）一个都搜不出来",
+    )
+    await expect_error(check, lambda: linked.read_file("notes.py"), "read_file 读指向仓库外的链接被拒绝", "越界")
+    await expect_error(
+        check, lambda: linked.read_file("inner.py"), "仓库内的链接也不跟随（git 对象重放不出链接目标的内容）", "符号链接"
+    )
+    await expect_error(check, lambda: linked.tree("linkdir"), "repo_tree 不能经由目录链接走出仓库", "越界")
+    link_rows = {row["path"]: row for row in linked.tree()["rows"]}
+    check(
+        link_rows.get("notes.py", {}).get("type") == "symlink" and link_rows["notes.py"]["size"] is None,
+        "repo_tree 把链接标成 symlink，不暴露链接目标的类型与大小",
+    )
+    # 真克隆：core.symlinks=false，链接检出成"内容是目标路径"的普通文件——与 git 对象一致
+    link_src = work / "symlink-src"
+    shutil.rmtree(link_src, ignore_errors=True)
+    (link_src / "pkg").mkdir(parents=True)
+    (link_src / "pkg" / "real.py").write_text("value = 1\n", encoding="utf-8")
+    (link_src / "notes.py").symlink_to("../outside/secret.txt")
+    commit_all(link_src)
+    link_info = clone_repo(str(link_src), work / "symlink-clone")
+    cloned_notes = work / "symlink-clone" / "notes.py"
+    check(
+        not cloned_notes.is_symlink() and cloned_notes.read_text(encoding="utf-8") == "../outside/secret.txt",
+        "克隆带 core.symlinks=false：链接检出成内容为目标路径的普通文件",
+    )
+    cloned = RepoSource(work / "symlink-clone", link_info.commit_sha)
+    check(
+        cloned.read_file("notes.py")["numbered"].strip().endswith("../outside/secret.txt")
+        and cloned.content_at_commit("notes.py") == "../outside/secret.txt"
+        and not cloned.search("SYMLINK_CANARY")["hits"],
+        "工作区读到的就是 git 对象里的内容（核验可重放），仓库外的文件读不到",
+    )
+
+    # ---- 搜索截断如实上报 + glob 语义（2026-09-26 审查修复）----
+    # 修复前：先截前 4000 个文件再按 glob 过滤，而且截断永远标不出来 → 回报"扫完了"，
+    # 实现排在后面的仓库被判 not_found（4100 个文件 → 0 命中、complete=True，已复现）。
+    many_dir = work / "many-files"
+    (many_dir / "a_data").mkdir(parents=True, exist_ok=True)
+    for index in range(MAX_SEARCH_FILES + 50):
+        (many_dir / "a_data" / f"{index:05d}.txt").write_text("x\n", encoding="utf-8")
+    (many_dir / "zz_src").mkdir(exist_ok=True)
+    (many_dir / "zz_src" / "impl.py").write_text("class LoRALayer:\n    pass\n", encoding="utf-8")
+    many = RepoSource(many_dir, "deadbeef")
+    over = many.search("LoRALayer")
+    check(
+        over["complete"] is False and "截断" in over["note"],
+        f"候选文件超过 {MAX_SEARCH_FILES} 个时如实标注没搜完（扫了 {over['files_scanned']} 个）",
+    )
+    only_py = many.search("LoRALayer", glob="*.py")
+    check(
+        only_py["complete"] is True and [hit["path"] for hit in only_py["hits"]] == ["zz_src/impl.py"],
+        "先按 glob 过滤再计数：限定 *.py 后能搜完并命中",
+    )
+    shutil.rmtree(many_dir, ignore_errors=True)
+    scoped = repo.search("lora_", glob="loralib/**/*.py")
+    check(
+        "loralib/layers.py" in {hit["path"] for hit in scoped["hits"]},
+        "glob 从仓库根算起并支持 **：loralib/**/*.py 能匹配 loralib/layers.py",
+    )
+    check(
+        not repo.search("lora_", glob="/layers.py")["hits"] and bool(repo.search("lora_", glob="layers.py")["hits"]),
+        "不含 / 的 glob 匹配任意深度的文件名；含 / 的从根算起",
+    )
 
     # ---- 核验：五种失败形态 ----
     content = repo.content_at_commit("loralib/layers.py")

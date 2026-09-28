@@ -63,9 +63,16 @@ class ProviderConfig(BaseModel):
 
         openai-compatible -> "openai/<model>"   （litellm 用这个前缀表示"OpenAI 协议形状"）
         anthropic         -> "anthropic/<model>"
+
+        填了 base_url 的 openai-compatible：model 就是端点要的**原始模型名**，一律加前缀后
+        原样发送。OpenRouter 的 `anthropic/claude-…`、SiliconFlow 的 `Qwen/Qwen2.5-…`、
+        vLLM 的 HF 模型名本身都带 `/`；原来"带 / 就当用户自己写了前缀"，会让 litellm
+        把第一段当成路由（`Qwen` 报 provider 不存在，`anthropic/…` 被改走 Anthropic 协议）。
         """
+        if self.protocol == "openai-compatible" and self.base_url:
+            return f"openai/{self.model}"
         if "/" in self.model:
-            # 用户已经自己写了前缀（例如 "openai/gpt-4o" 或 "deepseek/deepseek-chat"），尊重它
+            # 没填 base_url 时保留逃生口：用户写的 litellm 原生前缀（如 "deepseek/deepseek-chat"）照用
             return self.model
         prefix = "openai" if self.protocol == "openai-compatible" else "anthropic"
         return f"{prefix}/{self.model}"
@@ -726,7 +733,11 @@ async def _completion_with_retries(
                 await asyncio.sleep(delay)
                 continue
             lowered = str(exc).lower()
-            if "stream_options" in lowered or "include_usage" in lowered or "unrecognized" in lowered:
+            # 只回退一次：必须是 stream_options 还在、且报错像是在说它。原来没有这个前提，
+            # 端点对别的参数回 "Unrecognized request argument"（Azure 风格）时会无限立即重发。
+            if "stream_options" in kwargs and (
+                "stream_options" in lowered or "include_usage" in lowered or "unrecognized" in lowered
+            ):
                 kwargs.pop("stream_options", None)
                 continue
             raise
@@ -795,6 +806,7 @@ async def stream_turn(
     # 出现两份重复的中间过程；那种情况如实失败，靠「失败也交付」保住已确认的结论。
     mid_rounds = 0
     while True:
+        response = None
         try:
             response = await _completion_with_retries(
                 kwargs, on_retry, pace_key=pace_key, tokens=tokens, retries=retries
@@ -805,7 +817,15 @@ async def stream_turn(
                     await on_text(new_text)
         except Exception as exc:  # noqa: BLE001
             limit = _llm_retry_limit() if retries is None else max(0, int(retries))
-            if mid_rounds >= limit or classify_llm_error(exc) != "transient" or acc.deltas_seen > 0:
+            # response is None：请求阶段就失败了，_completion_with_retries 已经按类重试过；
+            # 这里再重试会让两层次数相乘（端点宕机时单轮 36 次请求、等 18 分钟）。
+            # 这一层只管「流已经开始、但还没收到内容就断了」。
+            if (
+                response is None
+                or mid_rounds >= limit
+                or classify_llm_error(exc) != "transient"
+                or acc.deltas_seen > 0
+            ):
                 raise
             delay = _retry_delay(exc, mid_rounds, "transient", key=pace_key)
             mid_rounds += 1
