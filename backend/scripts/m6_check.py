@@ -274,10 +274,13 @@ async def section_c(check: Checker) -> None:
         return
 
     syntax = subprocess.run(
-        ["node", "--test", "lib/syntax.test.mjs", "lib/codeAnnotations.test.mjs"],
+        ["node", "--test", "lib/syntax.test.mjs", "lib/codeAnnotations.test.mjs", "lib/markdownBlocks.test.mjs"],
         cwd=FRONTEND, capture_output=True, text=True, timeout=60,
     )
-    check(syntax.returncode == 0, "代码着色保留原文，行内讲解正确映射且不丢失异常引用")
+    check(
+        syntax.returncode == 0,
+        "代码着色保留原文，行内讲解正确映射且不丢失异常引用；残缺讲解与特殊换行符不会让页面崩溃或卡死",
+    )
     if syntax.returncode:
         print(syntax.stdout + syntax.stderr, flush=True)
 

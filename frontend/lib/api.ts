@@ -18,12 +18,28 @@ async function jsonOrThrow(response: Response) {
   return response.json();
 }
 
+/**
+ * 只把后端认识的 provider 字段发出去（后端是 extra="forbid"）。
+ * 表单状态里可能混进别的字段——例如从 localStorage 恢复时带回来的 remember_key——
+ * 原样发出去会让自检、上传、侦察、定位、追问全部 422。
+ */
+export function toProviderPayload(config: ProviderConfig): ProviderConfig {
+  const payload: ProviderConfig = {
+    protocol: config.protocol,
+    base_url: config.base_url,
+    api_key: config.api_key,
+    model: config.model,
+  };
+  if (config.label) payload.label = config.label;
+  return payload;
+}
+
 export async function smokeTest(config: ProviderConfig): Promise<SmokeResult> {
   return jsonOrThrow(
     await fetch(`${API_BASE}/api/provider/smoke-test`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(config),
+      body: JSON.stringify(toProviderPayload(config)),
     }),
   );
 }
@@ -32,7 +48,7 @@ export async function createRun(file: File, config: ProviderConfig): Promise<Cre
   const form = new FormData();
   form.append("file", file);
   // api_key 只放在这一次请求的 body 里：后端不落库、不写日志，前端也不持久化
-  form.append("provider", JSON.stringify(config));
+  form.append("provider", JSON.stringify(toProviderPayload(config)));
   return jsonOrThrow(await fetch(`${API_BASE}/api/runs`, { method: "POST", body: form }));
 }
 
@@ -41,7 +57,7 @@ export async function startRecon(runId: string, config: ProviderConfig) {
     await fetch(`${API_BASE}/api/runs/${runId}/recon`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ provider: config }),
+      body: JSON.stringify({ provider: toProviderPayload(config) }),
     }),
   );
 }
@@ -97,7 +113,7 @@ export async function postChat(
     await fetch(`${API_BASE}/api/runs/${runId}/chat`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ ...payload, provider: toProviderPayload(payload.provider) }),
     }),
   );
 }
@@ -112,7 +128,7 @@ export async function startLocate(
     await fetch(`${API_BASE}/api/runs/${runId}/locate`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ provider: config, repo_url: repoUrl, selected_ids: selectedIds }),
+      body: JSON.stringify({ provider: toProviderPayload(config), repo_url: repoUrl, selected_ids: selectedIds }),
     }),
   );
 }

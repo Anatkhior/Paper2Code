@@ -16,7 +16,8 @@ export interface CodeAnnotation extends WalkthroughStep {
 }
 
 /** 引用必须有明确文件与有效行号；不猜位置，也不丢弃无法定位的讲解。 */
-function parseReference(lineRef: string): CodeReference | null {
+function parseReference(lineRef: unknown): CodeReference | null {
+  if (typeof lineRef !== "string") return null;
   const match = lineRef.trim().match(/^(.+):([0-9]+)(?:-([0-9]+))?$/);
   if (!match) return null;
   const start = Number(match[2]);
@@ -25,10 +26,23 @@ function parseReference(lineRef: string): CodeReference | null {
   return { path: match[1], start, end };
 }
 
+/**
+ * 讲解来自模型：后端对字段只做了宽松校验（打回额度用完后会接受但标记），
+ * 缺 line_ref、text 不是字符串都可能出现。在入口处规范化，渲染层不许因此崩掉整页。
+ */
+function normalizeStep(step: unknown): WalkthroughStep {
+  const raw = (step && typeof step === "object" ? step : {}) as Record<string, unknown>;
+  return {
+    line_ref: typeof raw.line_ref === "string" ? raw.line_ref : "",
+    text: typeof raw.text === "string" ? raw.text : raw.text == null ? "" : String(raw.text),
+  };
+}
+
 export function placeCodeAnnotations(steps: WalkthroughStep[] | undefined, visible: (CodeReference & { total?: number }) | null) {
   const byLine = new Map<number, CodeAnnotation[]>();
   const unplaced: CodeAnnotation[] = [];
-  (steps ?? []).forEach((step, id) => {
+  (Array.isArray(steps) ? steps : []).forEach((rawStep, id) => {
+    const step = normalizeStep(rawStep);
     const reference = parseReference(step.line_ref);
     const annotation: CodeAnnotation = { ...step, id, reference };
     if (!reference) {

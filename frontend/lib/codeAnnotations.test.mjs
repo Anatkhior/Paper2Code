@@ -73,3 +73,12 @@ test("未打开文件时保留讲解，空讲解不产生虚构注释", () => {
   assert.equal(empty.byLine.size, 0);
   assert.equal(empty.unplaced.length, 0);
 });
+
+test("模型给的讲解字段残缺时不崩页面：缺 line_ref / 非字符串 / 空条目都保留为无法定位", () => {
+  const malformed = [{ text: "缺 line_ref" }, { line_ref: 37, text: "行号是数字" }, null, { line_ref: "src/layers.py:37", text: 42 }];
+  const { byLine, unplaced } = placeCodeAnnotations(malformed, visible);
+  assert.equal(unplaced.length, 3);
+  assert.ok(unplaced.every((item) => item.reference === null && item.notice === "引用格式无法定位"));
+  assert.equal(byLine.get(37)[0].text, "42");
+  assert.equal(placeCodeAnnotations("不是数组", visible).unplaced.length, 0);
+});

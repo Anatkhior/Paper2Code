@@ -152,13 +152,19 @@ export default function Home() {
     try {
       const raw = window.localStorage.getItem(STORAGE_KEY);
       if (raw) {
-        const saved = JSON.parse(raw) as Partial<ProviderConfig> & { remember_key?: boolean };
+        const saved = JSON.parse(raw) as Record<string, unknown>;
+        const text = (value: unknown) => (typeof value === "string" ? value : undefined);
+        // 按字段取、按类型收：存储里还有 remember_key（本地开关），整个对象摊进表单状态
+        // 会让它跟着每个请求发给后端（extra="forbid" → 全部 422）
         setProvider((current) => ({
           ...current,
-          ...saved,
-          api_key: saved.remember_key ? (saved.api_key ?? "") : "",
+          protocol:
+            saved.protocol === "anthropic" || saved.protocol === "openai-compatible" ? saved.protocol : current.protocol,
+          base_url: text(saved.base_url) ?? current.base_url,
+          model: text(saved.model) ?? current.model,
+          api_key: saved.remember_key === true ? (text(saved.api_key) ?? "") : "",
         }));
-        setRememberKey(Boolean(saved.remember_key));
+        setRememberKey(saved.remember_key === true);
       }
     } catch {
       /* localStorage 里的脏数据不该让页面挂掉 */

@@ -2,6 +2,8 @@
 
 import { Fragment, useMemo, type ReactNode } from "react";
 
+import { parseBlocks, type Block } from "@/lib/markdownBlocks";
+
 /**
  * 极简 Markdown 渲染（模型实际会用的那几种写法）。
  *
@@ -15,14 +17,6 @@ import { Fragment, useMemo, type ReactNode } from "react";
  * 支持：`**粗体**`、`*斜体*`、`` `代码` ``、`[文字](https://…)`、`- / 1.` 列表、
  * `> 引用`、``` 代码块 ```、`#`~`######` 标题。其余一律当纯文本。
  */
-
-type Block =
-  | { kind: "p"; lines: string[] }
-  | { kind: "h"; level: number; text: string }
-  | { kind: "ul"; items: string[] }
-  | { kind: "ol"; items: string[] }
-  | { kind: "quote"; lines: string[] }
-  | { kind: "code"; text: string };
 
 const INLINE = /`([^`]+)`|\*\*([^*]+)\*\*|\*([^*\n]+)\*|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
 
@@ -63,75 +57,6 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
   }
   if (cursor < text.length) nodes.push(text.slice(cursor));
   return nodes;
-}
-
-function parseBlocks(text: string): Block[] {
-  const blocks: Block[] = [];
-  const lines = text.replace(/\r\n?/g, "\n").split("\n");
-  let index = 0;
-  while (index < lines.length) {
-    const line = lines[index];
-    if (!line.trim()) {
-      index += 1;
-      continue;
-    }
-    const fence = line.match(/^\s*```/);
-    if (fence) {
-      const body: string[] = [];
-      index += 1;
-      while (index < lines.length && !/^\s*```/.test(lines[index])) {
-        body.push(lines[index]);
-        index += 1;
-      }
-      index += 1; // 跳过收尾的 ```
-      blocks.push({ kind: "code", text: body.join("\n") });
-      continue;
-    }
-    const heading = line.match(/^\s*(#{1,6})\s+(.*)$/);
-    if (heading) {
-      blocks.push({ kind: "h", level: heading[1].length, text: heading[2] });
-      index += 1;
-      continue;
-    }
-    if (/^\s*>\s?/.test(line)) {
-      const quoted: string[] = [];
-      while (index < lines.length && /^\s*>\s?/.test(lines[index])) {
-        quoted.push(lines[index].replace(/^\s*>\s?/, ""));
-        index += 1;
-      }
-      blocks.push({ kind: "quote", lines: quoted });
-      continue;
-    }
-    if (/^\s*[-*+]\s+/.test(line)) {
-      const items: string[] = [];
-      while (index < lines.length && /^\s*[-*+]\s+/.test(lines[index])) {
-        items.push(lines[index].replace(/^\s*[-*+]\s+/, ""));
-        index += 1;
-      }
-      blocks.push({ kind: "ul", items });
-      continue;
-    }
-    if (/^\s*\d+[.)]\s+/.test(line)) {
-      const items: string[] = [];
-      while (index < lines.length && /^\s*\d+[.)]\s+/.test(lines[index])) {
-        items.push(lines[index].replace(/^\s*\d+[.)]\s+/, ""));
-        index += 1;
-      }
-      blocks.push({ kind: "ol", items });
-      continue;
-    }
-    const paragraph: string[] = [];
-    while (
-      index < lines.length &&
-      lines[index].trim() &&
-      !/^\s*(```|#{1,6}\s|>|[-*+]\s|\d+[.)]\s)/.test(lines[index])
-    ) {
-      paragraph.push(lines[index].trim());
-      index += 1;
-    }
-    blocks.push({ kind: "p", lines: paragraph });
-  }
-  return blocks;
 }
 
 /**
