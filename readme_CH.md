@@ -462,5 +462,4 @@ docs/v0-spec.md          规格：决策、范围、schema、安全、评估、�
 
 ## 许可证
 
-<!-- TODO：选定许可证（例如 MIT 或 Apache-2.0），在仓库根目录添加 LICENSE 文件后更新本节。 -->
-本仓库暂未附带开源许可证。在添加 LICENSE 之前，默认保留所有权利。
+本项目采用 [Apache License 2.0](LICENSE) 许可。
