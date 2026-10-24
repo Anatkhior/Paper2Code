@@ -18,6 +18,7 @@ __pycache__/
 # 运行产物（每次分析一个目录）
 backend/data/
 backend/.dev-logs/
+backend/eval/reports/
 backend/tests/fixtures/*.pdf
 backend/tests/fixtures/sample_repo/
 backend/tests/fixtures/.cache/
@@ -35,3 +36,8 @@ out/
 
 # 跨会话开发日志（含过程记录与本地环境细节）：不随仓库发布
 agent-log/
+
+# 从锁定版本的 pdfjs-dist 生成，本地提供 worker / 字体，不使用 CDN
+frontend/public/pdfjs/
+frontend/test-results/
+frontend/playwright-report/

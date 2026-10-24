@@ -15,6 +15,7 @@ import time
 from typing import Any, Awaitable, Callable
 
 from ..events import RunBus
+from ..language import language_instruction, normalize_language
 from ..providers import ProviderConfig, estimate_tokens, stream_turn
 from .tools.base import Budget, Tool, ToolContext, ToolError, ToolResult
 
@@ -41,6 +42,7 @@ async def run_agent(
     initial_state: dict[str, Any] | None = None,
     finalize: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]] | None = None,
     max_turns: int = DEFAULT_MAX_TURNS,
+    require_final_answer: bool = False,
 ) -> dict[str, Any]:
     tool_map = {tool.name: tool for tool in tools}
     tool_schemas = [tool.schema() for tool in tools] or None
@@ -75,9 +77,15 @@ async def run_agent(
     repeated_errors = 0
     tools_used: list[str] = []
     last_text = ""
+    answer_mode = False
+    answer_complete = False
+    finish_requested = False
+    turn_text = ""
 
     async def push_text(delta: str) -> None:
-        await bus.emit("assistant_text", delta=delta)
+        nonlocal turn_text
+        turn_text += delta
+        await bus.emit("assistant_text", delta=delta, mode="answer" if answer_mode else "research")
 
     paced_waits: list[float] = []
     budget_warned_pacing = False
@@ -122,6 +130,17 @@ async def run_agent(
             )
         if notice is None:
             return
+        if require_final_answer:
+            notice = (
+                f"[预算提醒] 已用 {budget.tool_calls}/{budget.max_tool_calls} 次查阅工具，"
+                f"剩余约 {max(0, int(remaining_wall))} 秒。优先回答用户的问题，"
+                "停止不必要的查阅；finish 只结束查阅，之后必须输出完整回答正文，而不是开场白。"
+            )
+        elif "record_plan" in tool_map and "record_finding" not in tool_map:
+            notice = (
+                f"[预算提醒] 已用 {budget.tool_calls}/{budget.max_tool_calls} 次工具调用，"
+                "请尽快用 record_plan 提交有原文证据的创新点清单，不再开启新探索方向。"
+            )
         messages.append({"role": "user", "content": notice})
         await bus.emit(
             "budget_warning",
@@ -153,14 +172,34 @@ async def run_agent(
                 reason=(
                     f"按当前端点节奏（每 {interval:.1f}s 一次调用），剩余 {remaining_calls} 次调用约需 "
                     f"{expected / 60:.1f} 分钟，而墙钟预算只剩 {remaining_wall / 60:.1f} 分钟 —— "
-                    "这轮很可能跑不完。要么调大 PAPERLENS_WALL_CLOCK_SECONDS，要么换限额更宽的端点。"
+                    "这轮很可能跑不完。要么调大 PAPER2CODE_WALL_CLOCK_SECONDS，要么换限额更宽的端点。"
                 ),
                 used=budget.snapshot(),
             )
 
     try:
         while True:
+            if require_final_answer and not answer_mode and (
+                finish_requested or budget.max_tool_calls - budget.tool_calls <= 2
+                or budget.wall_clock_seconds - budget.elapsed <= max(30, budget.wall_clock_seconds * .25)
+                or turn >= max_turns - 1
+            ):
+                answer_mode = True
+                last_text = ""
+                messages.append({"role": "user", "content": (
+                    "查阅阶段已结束。现在不再调用任何工具，直接输出给用户的完整回答正文。"
+                    "不要只说‘下面介绍’或‘已读完’。依据已读材料回答原问题；解释动机、方法和关键术语，"
+                    "说明尚未核实的部分，不要假装读过没有读到的页。"
+                    + language_instruction(normalize_language((meta or {}).get("output_language")))
+                )})
             reason = budget.exceeded(time.monotonic())
+            if require_final_answer:
+                # 正文不调用工具，因此工具额度耗尽不应吞掉已查到的材料；时间/token 仍是硬限制。
+                reason = None
+                if budget.elapsed >= budget.wall_clock_seconds:
+                    reason = "追问运行时长达到上限"
+                elif budget.input_tokens >= budget.max_input_tokens:
+                    reason = "追问输入 token 达到上限"
             if reason and paced_waits:
                 reason += f"（其中 {sum(paced_waits):.0f}s 花在端点限额等待上）"
             if reason:
@@ -173,10 +212,17 @@ async def run_agent(
                 break
 
             turn += 1
-            await bus.emit("step_start", turn=turn)
-            await _maybe_remind_budget()
+            turn_text = ""
+            await bus.emit("step_start", turn=turn, mode="answer" if answer_mode else "research")
+            if not answer_mode:
+                await _maybe_remind_budget()
 
-            budget.input_tokens += estimate_tokens(messages, tool_schemas)
+            schemas = None if answer_mode else tool_schemas
+            estimated_input = estimate_tokens(messages, schemas)
+            if require_final_answer and budget.input_tokens + estimated_input > budget.max_input_tokens:
+                stopped_reason = "剩余输入 token 预算不足以生成回答"
+                break
+            budget.input_tokens += estimated_input
 
             async def _on_llm_retry(
                 attempt: int, delay: float, detail: str, reason: str = ""
@@ -192,29 +238,38 @@ async def run_agent(
                 )
                 await _warn_if_budget_infeasible()
 
-            result = await stream_turn(
-                cfg, messages, tool_schemas, on_text=push_text, on_retry=_on_llm_retry
-            )
-            last_text = result.text
+            async with asyncio.timeout(max(0, budget.wall_clock_seconds - budget.elapsed) if require_final_answer else None):
+                result = await stream_turn(
+                    cfg, messages, schemas, on_text=push_text, on_retry=_on_llm_retry
+                )
+            # 带工具调用的文字是查阅过程，不是已经交付的答案。
+            last_text = result.text if not require_final_answer or not result.tool_calls else ""
             budget.output_tokens += estimate_tokens([{"role": "assistant", "content": result.text}])
 
             if result.usage:
                 # 端点自己报了用量就以它为准（§8 的诚实记账）
                 prompt_tokens = result.usage.get("prompt_tokens")
                 if isinstance(prompt_tokens, int) and prompt_tokens > 0:
-                    budget.input_tokens += prompt_tokens - estimate_tokens(messages, tool_schemas)
+                    budget.input_tokens += prompt_tokens - estimated_input
 
             messages.append(result.assistant_message())
 
             if not result.tool_calls:
+                answer_complete = bool(last_text.strip()) and result.finish_reason not in {"length", "max_tokens"}
                 stopped_reason = "模型没有继续调用工具"
+                if require_final_answer and not answer_complete:
+                    stopped_reason = "回答正文为空或被端点截断"
                 break
+            if answer_mode:
+                raise RuntimeError("正文阶段仍返回了工具调用，没有交付完整回答")
 
             terminate = False
             batch_error_signatures: list[str] = []
             for call in result.tool_calls:
-                budget.tool_calls += 1
-                tools_used.append(call.name)
+                within_budget = not require_final_answer or budget.tool_calls < budget.max_tool_calls
+                if within_budget:
+                    budget.tool_calls += 1
+                    tools_used.append(call.name)
                 args = call.arguments()
                 await bus.emit(
                     "tool_call",
@@ -227,7 +282,11 @@ async def run_agent(
                 started = time.monotonic()
                 is_error = False
                 tool = tool_map.get(call.name)
-                if tool is None:
+                if not within_budget:
+                    is_error = True
+                    content = "查阅工具预算已用完，本次工具未执行。请根据已取得的材料回答。"
+                    details: dict[str, Any] = {}
+                elif tool is None:
                     is_error = True
                     content = f"[错误] 不存在名为 {call.name} 的工具。可用工具：{sorted(tool_map)}"
                     details: dict[str, Any] = {}
@@ -297,19 +356,32 @@ async def run_agent(
                         f"{batch_error_signatures[0].split('::', 1)[-1][:160]}"
                     )
                     await bus.emit("budget_warning", reason=stopped_reason, used=budget.snapshot())
+                    if require_final_answer:
+                        finish_requested = True
+                        continue
                     break
             else:
                 last_error_signature = None
                 repeated_errors = 0
 
             if terminate:
+                if require_final_answer:
+                    finish_requested = True
+                    continue
                 stopped_reason = "Agent 主动结束"
                 break
 
     except asyncio.CancelledError:
         status = "cancelled"
         stopped_reason = "用户取消"
-        await bus.emit("run_end", status=status, stopped_reason=stopped_reason, usage=budget.snapshot())
+        summary = {"status": status, "stopped_reason": stopped_reason, "usage": budget.snapshot()}
+        if require_final_answer and finalize is not None:
+            summary.update(final_text=turn_text or last_text, tools_used=tools_used, partial=True)
+            try:
+                summary.update(await finalize(summary))
+            except Exception as exc:  # noqa: BLE001
+                await bus.emit("error", kind=f"finalize:{type(exc).__name__}", message=str(exc)[:300])
+        await bus.emit("run_end", **summary)
         raise
     except Exception as exc:  # noqa: BLE001
         status = "failed"
@@ -324,7 +396,7 @@ async def run_agent(
             "turns": turn,
             "coverage_note": coverage_note,
             "usage": budget.snapshot(),
-            "final_text": last_text,
+            "final_text": (turn_text or last_text) if require_final_answer else last_text,
             "tools_used": tools_used,
             "plan": ctx.state.get("plan"),
             "findings": ctx.state.get("findings"),
@@ -343,6 +415,9 @@ async def run_agent(
         await bus.emit("run_end", **summary)
         return summary
 
+    if require_final_answer and not answer_complete:
+        status = "failed"
+
     summary = {
         "status": status,
         "stopped_reason": stopped_reason,
@@ -356,6 +431,8 @@ async def run_agent(
         "plan": ctx.state.get("plan"),
         "findings": ctx.state.get("findings"),
     }
+    if require_final_answer:
+        summary["partial"] = not answer_complete
     # finalize 必须在 run_end **之前**跑：
     # 事件契约里 run_end 是最后一条事件，前端看到它就收工关流。
     # 任何"想被用户看见的结果"都必须赶在它前面发出去。

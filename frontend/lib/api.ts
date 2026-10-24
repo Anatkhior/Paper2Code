@@ -1,4 +1,4 @@
-import type { CreateRunResponse, ProviderConfig, SmokeResult } from "./types";
+import type { CreateRunResponse, OutputLanguage, ProviderConfig, SmokeResult } from "./types";
 
 /** 后端地址。本地开发默认 8000；换端口就设 NEXT_PUBLIC_API_BASE。 */
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
@@ -44,20 +44,21 @@ export async function smokeTest(config: ProviderConfig): Promise<SmokeResult> {
   );
 }
 
-export async function createRun(file: File, config: ProviderConfig): Promise<CreateRunResponse> {
+export async function createRun(file: File, config: ProviderConfig, outputLanguage: OutputLanguage): Promise<CreateRunResponse> {
   const form = new FormData();
   form.append("file", file);
   // api_key 只放在这一次请求的 body 里：后端不落库、不写日志，前端也不持久化
   form.append("provider", JSON.stringify(toProviderPayload(config)));
+  form.append("output_language", outputLanguage);
   return jsonOrThrow(await fetch(`${API_BASE}/api/runs`, { method: "POST", body: form }));
 }
 
-export async function startRecon(runId: string, config: ProviderConfig) {
+export async function startRecon(runId: string, config: ProviderConfig, outputLanguage: OutputLanguage) {
   return jsonOrThrow(
     await fetch(`${API_BASE}/api/runs/${runId}/recon`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ provider: toProviderPayload(config) }),
+      body: JSON.stringify({ provider: toProviderPayload(config), output_language: outputLanguage }),
     }),
   );
 }
@@ -107,7 +108,7 @@ export async function fetchChat(runId: string) {
 /** 追问一句。Agent 会自己决定要不要去翻论文/代码。 */
 export async function postChat(
   runId: string,
-  payload: { provider: ProviderConfig; message: string; context_ids?: string[] },
+  payload: { provider: ProviderConfig; message: string; context_ids?: string[]; output_language: OutputLanguage },
 ) {
   return jsonOrThrow(
     await fetch(`${API_BASE}/api/runs/${runId}/chat`, {
@@ -123,12 +124,13 @@ export async function startLocate(
   config: ProviderConfig,
   repoUrl: string,
   selectedIds: string[],
+  outputLanguage: OutputLanguage,
 ) {
   return jsonOrThrow(
     await fetch(`${API_BASE}/api/runs/${runId}/locate`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ provider: toProviderPayload(config), repo_url: repoUrl, selected_ids: selectedIds }),
+      body: JSON.stringify({ provider: toProviderPayload(config), repo_url: repoUrl, selected_ids: selectedIds, output_language: outputLanguage }),
     }),
   );
 }
@@ -159,7 +161,7 @@ export interface PaperPageView {
   page_height: number;
   /** 引文在这一页上的高亮矩形 [[x0,y0,x1,y1], …]（PDF 点）；为空表示这一页没定位到 */
   highlight_rects: number[][];
-  /** 高亮覆盖率（匹配到的词 / 引文总词数）；<1 说明有公式等匹配不到的部分 */
+  /** 高亮覆盖率（实际显示的规范化字符 / 引文字符数，不含空白）；<1 表示部分匹配 */
   highlight_coverage?: number | null;
 }
 

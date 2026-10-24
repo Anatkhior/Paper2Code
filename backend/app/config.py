@@ -1,8 +1,8 @@
 """全局配置：预算护栏默认值 + 数据目录。
 
-所有值都可以用环境变量覆盖，前缀 PAPERLENS_，例如：
-    PAPERLENS_MAX_TOOL_CALLS=20
-    PAPERLENS_WALL_CLOCK_SECONDS=300
+所有值都可以用环境变量覆盖，前缀 PAPER2CODE_，例如：
+    PAPER2CODE_MAX_TOOL_CALLS=20
+    PAPER2CODE_WALL_CLOCK_SECONDS=300
 
 这些默认值对应 docs/v0-spec.md §8「运行治理」。
 """
@@ -14,12 +14,14 @@ from typing import Annotated, Any, Literal
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from .config_compat import canonical_env
+
 
 def _as_list(value: Any) -> Any:
     """list 型配置的容错解析：JSON（`["a","b"]`）和逗号分隔（`a,b`）都接受。
 
     为什么需要：pydantic-settings 对 list 字段默认只认 JSON，用户按直觉写
-    `PAPERLENS_REPO_ALLOWED_HOSTS=github.com,gitee.com` 会让**整个后端在导入时崩掉**
+    `PAPER2CODE_REPO_ALLOWED_HOSTS=github.com,gitee.com` 会让**整个后端在导入时崩掉**
     （SettingsError: error parsing value for field ...，2026-09-14 实测）。
     配置项的报错文案全都引导用户去设这些变量，所以这层容错是必须的。
     """
@@ -38,8 +40,15 @@ def _as_list(value: Any) -> Any:
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="PAPERLENS_", env_file=".env", extra="ignore"
+        env_prefix="PAPER2CODE_", env_file=".env", extra="ignore"
     )
+
+    @classmethod
+    def settings_customise_sources(cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings):
+        # 分别规范化，保留进程环境 > .env 的优先级，不修改用户的文件或 os.environ。
+        for source in (env_settings, dotenv_settings):
+            source.env_vars = canonical_env(source.env_vars)
+        return init_settings, env_settings, dotenv_settings, file_secret_settings
 
     # 数据目录：每次分析一个子目录 data/<run_id>/
     data_dir: Path = Path("data")
@@ -72,7 +81,7 @@ class Settings(BaseSettings):
     # （"OpenAI/Python x.x"）当 bot 直接 403（实测于 2026-09-13，1li.li），
     # 请求根本到不了模型。默认带一个自定义标识（实测可通过），官方端点对 UA 无感。
     # 设为空字符串则回退为 SDK 默认 UA。
-    http_user_agent: str = "PaperLens/0.1"
+    http_user_agent: str = "Paper2code/0.1"
 
     # ---- 产物版本（改了提示词就要改它：幂等键里会用到）----
     prompt_version: str = "v0.2-m2"
@@ -90,7 +99,7 @@ class Settings(BaseSettings):
     # 必须是同一套标准，否则就会出现"按一套标准跳过、按另一套标准卡体积上限"。
     repo_sparse: bool = True
     # 追加的稀疏排除规则（gitignore 风格的负向模式，逗号分隔或 JSON）
-    # 例：PAPERLENS_REPO_SPARSE_EXCLUDE=!data,!/docs/assets
+    # 例：PAPER2CODE_REPO_SPARSE_EXCLUDE=!data,!/docs/assets
     repo_sparse_exclude: Annotated[list[str], NoDecode] = []
 
     # ---- 仓库克隆硬化（§10）----
@@ -122,7 +131,7 @@ class Settings(BaseSettings):
     #          安全边界（rebinding 可绕），公网部署必须另有网络层隔离。
     repo_network_mode: Literal["local", "hosted"] = "local"
     # 显式信任的地址段（逗号分隔）：企业内网镜像、本机代理的 fake-ip 段等。
-    # 例：PAPERLENS_REPO_ALLOW_CIDRS=198.18.0.0/15,10.20.0.0/16
+    # 例：PAPER2CODE_REPO_ALLOW_CIDRS=198.18.0.0/15,10.20.0.0/16
     repo_allow_cidrs: Annotated[list[str], NoDecode] = []
     # git 全局/系统配置是否隔离。None = 跟随部署模式（local 继承，hosted 隔离）。
     # 为什么要继承：企业用户靠 `git config --global` 配 http.proxy / http.sslCAInfo

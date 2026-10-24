@@ -19,6 +19,8 @@ export interface ChatTurn {
   tools_used?: string[];
   citations?: ChatCitation[];
   stopped_reason?: string;
+  status?: string;
+  partial?: boolean;
 }
 
 interface Props {
@@ -26,6 +28,8 @@ interface Props {
   /** 正在流式输出的那一轮回答（还没落盘） */
   streaming: string;
   busy: boolean;
+  progress?: string;
+  stoppedReason?: string;
   context: { id: string; name: string } | null;
   onClearContext: () => void;
   onSend: (message: string) => void;
@@ -58,6 +62,8 @@ export default function ChatPanel({
   turns,
   streaming,
   busy,
+  progress,
+  stoppedReason,
   context,
   onClearContext,
   onSend,
@@ -95,6 +101,9 @@ export default function ChatPanel({
         </span>
       </header>
 
+      {(busy || (progress && progress.includes("未"))) && <p role="status" aria-live="polite" className="px-3 py-2 text-sm text-neutral-600 dark:text-neutral-400">
+        {progress || "正在查阅资料"}{!busy && stoppedReason ? `：${stoppedReason}` : ""}
+      </p>}
       <div ref={scrollerRef} hidden={turns.length === 0 && !streaming} className="max-h-[52vh] space-y-3 overflow-auto p-3">
         {turns.map((turn, index) => (
           <div key={`${turn.role}-${index}-${turn.ts ?? index}`} className={turn.role === "user" ? "text-right" : ""}>
@@ -110,6 +119,7 @@ export default function ChatPanel({
 
             {turn.role === "assistant" && (
               <div className="mt-1 space-y-1 text-[11px] text-neutral-500">
+                {(turn.partial || (turn.status && turn.status !== "ok")) && <p className="text-amber-800 dark:text-amber-300" role="status">本轮未完整交付：{turn.stopped_reason || "回答中断"}。可以重新发送问题继续询问。</p>}
                 <div className="flex flex-wrap items-center gap-1">
                   <span>{turn.tools_used && turn.tools_used.length > 0 ? "这次查了：" : "这次没有查（凭已有产物回答）"}</span>
                   {(turn.tools_used ?? []).map((tool, toolIndex) => (

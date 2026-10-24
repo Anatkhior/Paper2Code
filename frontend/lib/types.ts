@@ -1,6 +1,7 @@
 /** 与后端事件契约一一对应的类型（docs/v0-spec.md §9）。 */
 
 export type Protocol = "openai-compatible" | "anthropic";
+export type OutputLanguage = "zh-CN" | "en";
 
 export interface ProviderConfig {
   protocol: Protocol;

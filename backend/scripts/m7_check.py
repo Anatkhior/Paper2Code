@@ -167,8 +167,8 @@ async def section_c(check: Checker, client: httpx.AsyncClient, run_id: str) -> N
         f"最多只烧了 {len(tool_calls)} 次工具调用（每条消息的上限是 8，run 级上限是 40）",
     )
     check(
-        "工具调用次数达到上限 8" in end["stopped_reason"],
-        f"停止原因说清是这条消息的预算用完了：{end['stopped_reason'][:60]}",
+        any(e["data"].get("mode") == "answer" for e in events_of(events, "step_start")) and end["status"] == "ok",
+        "查阅预算收束后进入无工具正文阶段，而不是把额度烧光后丢失回答",
     )
     check(
         "预算" in (reply.get("message") or ""),
@@ -275,22 +275,39 @@ async def section_g(check: Checker, client: httpx.AsyncClient) -> None:
         )
 
 
+async def section_h(check: Checker, client: httpx.AsyncClient, run_id: str) -> None:
+    check.section("H. 开场白 + finish 不能冒充完整回答")
+    before = (await client.get(f"/api/runs/{run_id}/chat")).json()["turns"]
+    events, reply = await ask(client, check, run_id, "帮初学者详细理解整篇论文", model="chat-finish-intro")
+    check(reply.get("message") != "下面给初学者一份完整导读。" and "低秩" in reply.get("message", ""), "finish 之后真正生成了讲解正文")
+    check(reply.get("status") == "ok" and reply.get("partial") is False, "正文完成状态显式交付")
+    check(any(e["data"].get("mode") == "answer" for e in events_of(events, "step_start")), "事件区分查阅与正文阶段")
+    warnings = " ".join(str(e["data"].get("reason", "")) for e in events_of(events, "budget_warning"))
+    check("record_finding" not in warnings, "追问不再收到代码定位的预算指令")
+    after = (await client.get(f"/api/runs/{run_id}/chat")).json()["turns"]
+    check(len(after) == len(before) + 2 and after[-1]["text"] == reply["message"], "一问一答只落盘一次且与事件一致")
+    events, reply = await ask(client, check, run_id, "故意测试空回答", model="chat-empty-answer")
+    check(reply.get("status") == "failed" and reply.get("partial") is True, "正文为空时明确失败，不能把开场白保存为成功")
+    check(events[-1]["type"] == "run_end", "空回答失败也正常关闭事件流")
+
+
 async def main() -> int:
     check = Checker("阶段③（追问对话）验收")
     mock = start_service("devtools.mock_provider:app", MOCK_PORT)
     app_proc = start_service(
-        "app.main:app", APP_PORT, extra_env={"PAPERLENS_ALLOW_LOCAL_REPO_PATHS": "true"}
+        "app.main:app", APP_PORT, extra_env={"PAPER2CODE_ALLOW_LOCAL_REPO_PATHS": "true"}
     )
     try:
         await wait_http(f"http://127.0.0.1:{MOCK_PORT}/health")
         await wait_http(f"{APP}/api/health")
-        print(f"mock provider : {MOCK_PORT}\nPaperLens API : {APP}", flush=True)
+        print(f"mock provider : {MOCK_PORT}\nPaper2code API : {APP}", flush=True)
 
         async with httpx.AsyncClient(base_url=APP, timeout=300) as client:
             run_id = await section_a(check, client)
             await section_b(check, client, run_id)
             await section_c(check, client, run_id)
             await section_d(check, client, run_id)
+            await section_h(check, client, run_id)
             await section_e(check, client)
             await section_g(check, client)   # 需要 client：放在 async with 里面
 

@@ -112,7 +112,7 @@ async def main() -> int:
     try:
         await wait_http(f"http://127.0.0.1:{MOCK_PORT}/health")
         await wait_http(f"{APP}/api/health")
-        print(f"mock provider  : {MOCK_BASE}\nPaperLens API  : {APP}\n", flush=True)
+        print(f"mock provider  : {MOCK_BASE}\nPaper2code API  : {APP}\n", flush=True)
 
         async with httpx.AsyncClient(timeout=120, base_url=APP) as client:
             # ---------------- 1 & 2. 启动自检及其失败分支 ----------------
@@ -154,7 +154,7 @@ async def main() -> int:
                 "不会把整页 HTML 原样丢给用户（这曾经是真 bug）",
             )
             check(
-                "PAPERLENS_HTTP_USER_AGENT" in html_blocked["diagnosis"],
+                "PAPER2CODE_HTTP_USER_AGENT" in html_blocked["diagnosis"],
                 "诊断里给出 UA 逃生开关（有些网关按 UA 拦 Python SDK，实测于 2026-09-13）",
             )
             check(
@@ -175,7 +175,7 @@ async def main() -> int:
 
             # ---- 客户端 UA 可控（第三方网关兼容性，2026-09-13）----
             # 实测：有套 Cloudflare 的网关按 User-Agent 把 openai-python SDK 形状的请求
-            # 直接 403（请求根本到不了模型）。默认 UA 已改为自定义的 PaperLens/0.1。
+            # 直接 403（请求根本到不了模型）。默认 UA 已改为自定义的 Paper2code/0.1。
             # mock 的 ua-check 会把收到的 UA 原样回显，以此断言自定义 UA 真的
             # 穿过 litellm/openai 客户端到达端点（而不是只改了配置没生效）。
             ua_turn = await stream_turn(

@@ -1,4 +1,4 @@
-# PaperLens
+# Paper2code
 
 **论文创新点 ↔ 代码实现的可核验对照系统**
 
@@ -12,7 +12,7 @@
 
 <!--
 界面截图（建议补上）：把截图放到 docs/images/ 后取消下面这行的注释。
-![PaperLens 对照阅读器](docs/images/reader.png)
+![Paper2code 对照阅读器](docs/images/reader.png)
 -->
 
 ---
@@ -21,7 +21,7 @@
 
 读论文配代码时，最费时间的往往是找对应关系：论文第 3 节那个公式，到底落在仓库的哪个文件、哪几行？
 
-通用对话模型能写出“看起来很懂”的解读，但很难判断它有没有编。PaperLens 想把这件事做成**可核验**的：
+通用对话模型能写出“看起来很懂”的解读，但很难判断它有没有编。Paper2code 想把这件事做成**可核验**的：
 
 - 论文侧的每条引文，都要能在指定页找到原文。
 - 代码侧的每条引用，都锚定到具体的 commit、文件、行号和片段哈希，后端可以从 git 对象里重放核对。
@@ -39,7 +39,7 @@
   - 论文引文逐条核对是否真出现在那一页，只匹配到开头的会标成“部分匹配”。
   - 代码引用的片段哈希由后端从 `git show <commit>:<path>` 计算，模型无权提供。核验只读 git 对象，不读工作区。
 - **双栏对照阅读器**
-  - 左栏有两种视图。「PDF 原版」由服务端渲染页面，再叠加引文高亮框，高亮覆盖率如实标注。「原文文本」可以划选文字。
+  - 左栏有两种视图。「PDF 原版」使用本地 PDF.js 渲染原始 PDF，并叠加可选择的文字层和引文高亮；可直接划选原版文字添加目标。「原文文本」保留作备用，扫描页没有文字层时会明确提示。
   - 右栏是代码：语法着色，标出引用行。AI 逐段讲解插在对应代码行前，并标注“AI 讲解 · 非仓库原文”。
 - **追问对话**
   - 可以针对当前创新点或整篇论文继续提问。Agent 会按需再查论文和代码，每条消息有独立的工具预算。
@@ -118,7 +118,7 @@ flowchart LR
 ### 环境要求
 
 - **Python ≥ 3.11**（推荐 3.12）。`litellm` 用到了 3.11 才有的 `typing.NotRequired`，3.10 会直接 ImportError。
-- **Node.js ≥ 20** 和 **pnpm**
+- **Node.js ≥ 22.13** 和 **pnpm**
 - **git ≥ 2.25**，部分克隆和稀疏检出需要它。
 - 辅助脚本是 bash 写的，开发和验收都在 Linux 上进行。Windows 用户建议用 WSL。
 
@@ -169,7 +169,7 @@ cd backend
 
 1. **模型设置**：`base_url` 填 `http://127.0.0.1:8123/v1`，`api_key` 填 `mock-key`，`model` 填 `mock-model`，然后点「运行自检」。
 2. **上传论文**：选择 `backend/tests/fixtures/synthetic_paper.pdf`，开始侦察。
-3. **勾选创新点**：可以在「原文文本」视图里划一段，把它加成新目标。
+3. **勾选创新点**：可以直接在「PDF 原版」上划选文字，把它加成新目标；不必切换纯文本。
 4. **代码仓库**：填 `backend/tests/fixtures/sample_repo` 的**绝对路径**，点「开始定位」。
 5. **对照阅读**：查看结论，点开引用看原文和代码，也可以继续追问。
 
@@ -188,7 +188,7 @@ cd backend
 ```bash
 # 终端 1：后端（允许把本地目录当仓库，只用于测试和演示）
 cd backend
-PAPERLENS_ALLOW_LOCAL_REPO_PATHS=true .venv/bin/python -m uvicorn app.main:app --port 8000
+PAPER2CODE_ALLOW_LOCAL_REPO_PATHS=true .venv/bin/python -m uvicorn app.main:app --port 8000
 
 # 终端 2：假端点
 cd backend
@@ -230,30 +230,34 @@ curl -s http://127.0.0.1:8000/api/provider/smoke-test \
 
 ## 配置
 
-后端配置都通过带 `PAPERLENS_` 前缀的环境变量传入，也可以写进 `backend/.env`。**配置在进程启动时读取，改完要重启后端。** list 类型的变量接受逗号分隔或 JSON 两种写法。
+改名前的 `PAPERLENS_*` 环境变量与 `.env` 仍然兼容；同一来源中新名字优先，进程环境始终优先于 `.env`。浏览器旧设置会安全迁移，未选择记住密钥时不会保存密钥。
+
+页面顶部的**解析语言**默认简体中文，可切换 English 并保存在浏览器中。它用于之后生成的创新点、代码逐段讲解和追问，不自动翻译已有结果；论文引文、代码标识符和路径保持原文。API 的上传表单与 recon/locate/chat 请求支持 `output_language`（`zh-CN` / `en`）；阶段请求省略时沿用 run 的设置，旧 run 默认中文。运行期间选择框禁用，避免混淆本轮所用语言。
+
+后端配置都通过带 `PAPER2CODE_` 前缀的环境变量传入，也可以写进 `backend/.env`。**配置在进程启动时读取，改完要重启后端。** list 类型的变量接受逗号分隔或 JSON 两种写法。
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `PAPERLENS_DATA_DIR` | `data` | 运行数据目录，每个 run 一个子目录 |
-| `PAPERLENS_MAX_TOOL_CALLS` | `40` | 单个阶段的工具调用上限 |
-| `PAPERLENS_MAX_INPUT_TOKENS` | `1500000` | 单个阶段累计输入 token 上限 |
-| `PAPERLENS_WALL_CLOCK_SECONDS` | `600` | 单个阶段的墙钟上限 |
-| `PAPERLENS_CHAT_MAX_TOOL_CALLS` | `8` | 每条追问的工具调用上限 |
-| `PAPERLENS_CHAT_MAX_INPUT_TOKENS` / `PAPERLENS_CHAT_WALL_CLOCK_SECONDS` | `400000` / `180` | 每条追问的 token 和时长上限 |
-| `PAPERLENS_PER_TURN_TIMEOUT_SECONDS` | `180` | 单次 LLM 调用超时 |
-| `PAPERLENS_LLM_MAX_REQUESTS_PER_MINUTE` | `0` | 客户端主动节流。`0` 表示不节流，撞到 429 后自适应 |
-| `PAPERLENS_LLM_MAX_RETRIES` | `5` | 限流或瞬时故障时的最大重试次数 |
-| `PAPERLENS_HTTP_USER_AGENT` | `PaperLens/0.1` | LLM 请求的 User-Agent（部分网关会拦截 SDK 默认 UA） |
-| `PAPERLENS_MAX_UPLOAD_MB` / `PAPERLENS_MAX_PAGES` | `50` / `50` | 论文大小和页数上限 |
-| `PAPERLENS_REPO_ALLOWED_HOSTS` | `github.com,gitlab.com` | 仓库域名白名单，条目可以写成 `host:port` |
-| `PAPERLENS_REPO_CLONE_TIMEOUT_SECONDS` | `300` | 克隆超时 |
-| `PAPERLENS_REPO_MAX_MB` | `200` | 克隆后的磁盘占用上限 |
-| `PAPERLENS_REPO_SPARSE` / `PAPERLENS_REPO_SPARSE_EXCLUDE` | `true` / 空 | 源码视图克隆开关，以及追加的排除规则（例如 `!data,!/docs/assets`） |
-| `PAPERLENS_REPO_NETWORK_MODE` | `local` | `local` 适合单机自用，只拒绝回环、链路本地等地址。`hosted` 适合公网部署，判定更严格 |
-| `PAPERLENS_REPO_ALLOW_CIDRS` | 空 | 显式信任的网段，例如企业内网镜像 `10.20.0.0/16` |
-| `PAPERLENS_REPO_DNS_CROSSCHECK` | `auto` | 是否用公网 DoH 交叉核验非公网解析结果。`auto` 表示只在 `hosted` 模式下核验 |
-| `PAPERLENS_ALLOW_LOCAL_REPO_PATHS` | `false` | 允许克隆本地目录。**只用于测试和演示，公网部署绝不能打开** |
-| `PAPERLENS_CORS_ORIGINS` | `["http://localhost:3000","http://127.0.0.1:3000"]` | 前端来源白名单（请用 JSON 写法） |
+| `PAPER2CODE_DATA_DIR` | `data` | 运行数据目录，每个 run 一个子目录 |
+| `PAPER2CODE_MAX_TOOL_CALLS` | `40` | 单个阶段的工具调用上限 |
+| `PAPER2CODE_MAX_INPUT_TOKENS` | `1500000` | 单个阶段累计输入 token 上限 |
+| `PAPER2CODE_WALL_CLOCK_SECONDS` | `600` | 单个阶段的墙钟上限 |
+| `PAPER2CODE_CHAT_MAX_TOOL_CALLS` | `8` | 每条追问的工具调用上限 |
+| `PAPER2CODE_CHAT_MAX_INPUT_TOKENS` / `PAPER2CODE_CHAT_WALL_CLOCK_SECONDS` | `400000` / `180` | 每条追问的 token 和时长上限 |
+| `PAPER2CODE_PER_TURN_TIMEOUT_SECONDS` | `180` | 单次 LLM 调用超时 |
+| `PAPER2CODE_LLM_MAX_REQUESTS_PER_MINUTE` | `0` | 客户端主动节流。`0` 表示不节流，撞到 429 后自适应 |
+| `PAPER2CODE_LLM_MAX_RETRIES` | `5` | 限流或瞬时故障时的最大重试次数 |
+| `PAPER2CODE_HTTP_USER_AGENT` | `Paper2code/0.1` | LLM 请求的 User-Agent（部分网关会拦截 SDK 默认 UA） |
+| `PAPER2CODE_MAX_UPLOAD_MB` / `PAPER2CODE_MAX_PAGES` | `50` / `50` | 论文大小和页数上限 |
+| `PAPER2CODE_REPO_ALLOWED_HOSTS` | `github.com,gitlab.com` | 仓库域名白名单，条目可以写成 `host:port` |
+| `PAPER2CODE_REPO_CLONE_TIMEOUT_SECONDS` | `300` | 克隆超时 |
+| `PAPER2CODE_REPO_MAX_MB` | `200` | 克隆后的磁盘占用上限 |
+| `PAPER2CODE_REPO_SPARSE` / `PAPER2CODE_REPO_SPARSE_EXCLUDE` | `true` / 空 | 源码视图克隆开关，以及追加的排除规则（例如 `!data,!/docs/assets`） |
+| `PAPER2CODE_REPO_NETWORK_MODE` | `local` | `local` 适合单机自用，只拒绝回环、链路本地等地址。`hosted` 适合公网部署，判定更严格 |
+| `PAPER2CODE_REPO_ALLOW_CIDRS` | 空 | 显式信任的网段，例如企业内网镜像 `10.20.0.0/16` |
+| `PAPER2CODE_REPO_DNS_CROSSCHECK` | `auto` | 是否用公网 DoH 交叉核验非公网解析结果。`auto` 表示只在 `hosted` 模式下核验 |
+| `PAPER2CODE_ALLOW_LOCAL_REPO_PATHS` | `false` | 允许克隆本地目录。**只用于测试和演示，公网部署绝不能打开** |
+| `PAPER2CODE_CORS_ORIGINS` | `["http://localhost:3000","http://127.0.0.1:3000"]` | 前端来源白名单（请用 JSON 写法） |
 
 前端只有一个配置项：`NEXT_PUBLIC_API_BASE`，默认是 `http://127.0.0.1:8000`。把 `frontend/.env.local.example` 复制成 `.env.local` 再修改。注意它在构建时就被写进产物，改完要重新构建。
 
@@ -269,7 +273,7 @@ curl -s http://127.0.0.1:8000/api/provider/smoke-test \
 | POST | `/api/runs/{id}/recon` | 启动阶段 A（侦察） |
 | GET | `/api/runs/{id}/plan` | 获取创新点清单（服务端为准，含用户添加的目标） |
 | POST / PATCH / DELETE | `/api/runs/{id}/plan/items[/{item_id}]` | 新增、修改、删除定位目标 |
-| POST | `/api/runs/{id}/locate` | 启动阶段 B（定位与核验） |
+| POST | `/api/runs/{id}/locate` | 启动阶段 B（定位与核验）；可选 `commit` 固定到完整的 40 位小写 SHA，不传则使用 HEAD |
 | GET / POST | `/api/runs/{id}/chat` | 获取对话记录 / 发一条追问 |
 | GET | `/api/runs/{id}/events` | 统一的 SSE 事件流，支持 `Last-Event-ID` / `?from_id=` 续传 |
 | GET | `/api/runs/{id}` | 事件历史和产物，用于刷新后回放 |
@@ -311,17 +315,29 @@ SSE 事件类型：`paper_ready`、`run_start`、`step_start`、`assistant_text`
 cd backend
 .venv/bin/python -m eval.run_eval                       # 离线基线（零成本）
 
-PAPERLENS_EVAL_BASE_URL=https://api.deepseek.com/v1 \
-PAPERLENS_EVAL_API_KEY=sk-... \
-PAPERLENS_EVAL_MODEL=deepseek-chat \
+PAPER2CODE_EVAL_BASE_URL=https://api.deepseek.com/v1 \
+PAPER2CODE_EVAL_API_KEY=sk-... \
+PAPER2CODE_EVAL_MODEL=deepseek-chat \
 .venv/bin/python -m eval.run_eval --provider real --label "DeepSeek-V3"
 ```
+
+评估运行的约定：
+
+- 用 `--goldset eval/goldset-real.yaml` 选择按下方模板另建的真实标注集；加 `--only lora` 可先跑一篇。默认 gold set 仍是合成夹具，换成真实端点不等于评估了真实论文。
+- `repo.commit_sha` 必须是完整的 **40 位小写 SHA**。脚本把它传给定位接口，按指定版本检出，评分前再核对产物；上游 HEAD 前进不影响旧标注。提交缺失、取不到或实际版本不符，都不会混入正式分数。
+- 真实模式保留环境变量与 `backend/.env` 中的限流、预算和网络配置。例如网关每分钟限 10 次，可设 `PAPER2CODE_LLM_MAX_REQUESTS_PER_MINUTE=10`；只有离线验收才固定关闭主动限流。
+- 离线报告仍写 `backend/eval/report.json` / `report.md`；真实报告独立写到 `backend/eval/reports/<时间>-<模型标签>-<随机标识>.json` / `.md`，同一秒启动也不会互相覆盖。真实报告默认被 git 忽略，公开前请检查其中的端点地址和错误信息。
+- 每处理一篇就保存报告。一篇失败，剩余篇目继续运行；有 `failed`（未交付）或 `invalid`（版本无效）时退出码为 **1**，并明确列出未计分篇目。预算耗尽或中途失败但已经交付的结果仍可评分，单独标记 `partial`，不会隐藏不完整表现。`--force` 仅用于诊断，不能把版本无效的结果变成有效分数。
+- 每篇记录两阶段的结束状态、停止原因、工具调用、token 与耗时。汇总用量包括失败篇目；缺失用量明确标记。输入 token 优先用端点返回值、缺失时估算；输出 token 为后端文本估算，**不是供应商账单**。
+- `--phase-timeout 1800` 控制每个阶段的等待上限（默认 1800 秒）；超时或断流会尝试取消服务端任务。取消请求失败也会写入错误，不能把它当成已停止计费。
 
 标注纪律写在 `backend/eval/goldset.yaml` 的文件头里，比数字本身更重要：
 
 1. **先标注、后运行**：人工读完论文和代码、写下答案并冻结 commit，之后才允许跑系统。
 2. **commit 必须冻结**：仓库一直在变，不钉死版本的指标没有意义。
 3. **gold set 只看一次**：想边跑边调提示词，请另开调参集。
+
+追问会先查阅资料，再提交完整回答正文；`finish` 只结束查阅。正文生成也遵守时间和 token 预算，中断、取消或空回答会明确标记，不把开场白冒充完整答案。PDF 的 worker、字体与 CMap 都由本机提供，不向外部服务发送论文。
 
 ## 测试与验收
 
@@ -330,6 +346,8 @@ PAPERLENS_EVAL_MODEL=deepseek-chat \
 ```bash
 cd backend
 ./scripts/run_all_checks.sh      # 一键全跑，任何一项失败都以非零码退出
+# 启动开发服务后：cd ../frontend && pnpm test:browser
+# 默认使用 /usr/bin/google-chrome，可用 PAPER2CODE_CHROME 指定浏览器路径
 ```
 
 | 脚本 | 覆盖内容 |
@@ -338,7 +356,7 @@ cd backend
 | `m1_check` | 阶段 A 全链路、引文核验与打回、限流退避、限额识别、瞬时故障重试 |
 | `m2_check` | 阶段 B：URL 与地址判定矩阵、源码视图克隆、核验的各种失败形态、部分勾选、原地打转早停、预算提醒 |
 | `m3_check` | 阅读端点、路径穿越、PDF 高亮矩形、前端生产构建与页面渲染 |
-| `m4_check` | 评估指标可证伪、gold set 卫生、README 数字一致性 |
+| `m4_check` | 评估指标可证伪、gold set 卫生、固定版本/限流/逐篇失败/报告隔离回归、README 数字一致性 |
 | `m6_check` | 划选添加定位目标、清单增删改与并发守卫 |
 | `m7_check` | 追问：事件链、历史传递、每条消息的工具上限、回答里的引用核对 |
 
@@ -359,7 +377,7 @@ cd backend
   - 克隆使用 `--depth 1 --filter=blob:none --sparse`，禁用 hooks、submodule 和 LFS。
   - 克隆时关闭符号链接（`core.symlinks=false`），读文件、列目录、搜索都不跟随链接，仓库里的链接没法把读取引到仓库外面。
   - 有体积上限、超时和路径穿越防护，并且**绝不执行仓库里的任何代码**。
-- **部署边界**：项目按单机自用设计，没有账号体系和鉴权。如果要部署到公网，除了设置 `PAPERLENS_REPO_NETWORK_MODE=hosted`，还需要自行补上鉴权和配额，并做网络层隔离（容器、netns、防火墙）。进程内的 DNS 检查不是安全边界。
+- **部署边界**：项目按单机自用设计，没有账号体系和鉴权。如果要部署到公网，除了设置 `PAPER2CODE_REPO_NETWORK_MODE=hosted`，还需要自行补上鉴权和配额，并做网络层隔离（容器、netns、防火墙）。进程内的 DNS 检查不是安全边界。
 
 ## 项目结构
 
@@ -412,31 +430,31 @@ docs/v0-spec.md          规格：决策、范围、schema、安全、评估、�
 <details>
 <summary>填了正常的 GitHub 地址，却报“解析到了内网/保留地址”</summary>
 
-多半是开着 Clash、Mihomo、sing-box 这类 TUN + fake-ip 代理：本机 DNS 把域名答成了 `198.18.x.x` 这样的占位地址。默认的 `local` 模式已经放行这种情况，只会在时间线上提示一句。如果设置了 `hosted` 模式，可以用 `PAPERLENS_REPO_ALLOW_CIDRS=198.18.0.0/15` 显式信任这个网段。公司内网的 GitLab 或镜像，需要把域名加进 `PAPERLENS_REPO_ALLOWED_HOSTS`。
+多半是开着 Clash、Mihomo、sing-box 这类 TUN + fake-ip 代理：本机 DNS 把域名答成了 `198.18.x.x` 这样的占位地址。默认的 `local` 模式已经放行这种情况，只会在时间线上提示一句。如果设置了 `hosted` 模式，可以用 `PAPER2CODE_REPO_ALLOW_CIDRS=198.18.0.0/15` 显式信任这个网段。公司内网的 GitLab 或镜像，需要把域名加进 `PAPER2CODE_REPO_ALLOWED_HOSTS`。
 </details>
 
 <details>
 <summary>运行中报 RateLimitError / 429</summary>
 
-通常不用配置。系统会优先读取响应头里声明的限额，其次识别网关的话术（中英文都认），自动降速，并在时间线上显示“等待 N 秒后重试”。如果是额度用尽或欠费，系统不会重试，会直接告诉你重试没用。想手动固定节奏，可以设置 `PAPERLENS_LLM_MAX_REQUESTS_PER_MINUTE`。已经定位并核验过的结论不会因为失败而丢失。
+通常不用配置。系统会优先读取响应头里声明的限额，其次识别网关的话术（中英文都认），自动降速，并在时间线上显示“等待 N 秒后重试”。如果是额度用尽或欠费，系统不会重试，会直接告诉你重试没用。想手动固定节奏，可以设置 `PAPER2CODE_LLM_MAX_REQUESTS_PER_MINUTE`。已经定位并核验过的结论不会因为失败而丢失。
 </details>
 
 <details>
 <summary>自检返回一整页 HTML 或 403</summary>
 
-有些套了 Cloudflare 的第三方网关会按 User-Agent 拦截 Python SDK 的请求。PaperLens 默认带自定义 UA `PaperLens/0.1`。如果仍然被拦，可以把 `PAPERLENS_HTTP_USER_AGENT` 设成任意一个浏览器 UA，然后重启后端。
+有些套了 Cloudflare 的第三方网关会按 User-Agent 拦截 Python SDK 的请求。Paper2code 默认带自定义 UA `Paper2code/0.1`。如果仍然被拦，可以把 `PAPER2CODE_HTTP_USER_AGENT` 设成任意一个浏览器 UA，然后重启后端。
 </details>
 
 <details>
 <summary>仓库里有很大的视频或数据集，克隆很慢或超出上限</summary>
 
-默认只取源码视图（部分克隆 + 稀疏检出）。实测一个含 83MB 演示视频的仓库，从 237MB 降到了 2.3MB。冷门的大二进制格式会在时间线上被点名，按提示加一条 `PAPERLENS_REPO_SPARSE_EXCLUDE=!*.xxx` 即可。
+默认只取源码视图（部分克隆 + 稀疏检出）。实测一个含 83MB 演示视频的仓库，从 237MB 降到了 2.3MB。冷门的大二进制格式会在时间线上被点名，按提示加一条 `PAPER2CODE_REPO_SPARSE_EXCLUDE=!*.xxx` 即可。
 </details>
 
 <details>
 <summary>工具调用次数用完了，却一条结论都没有</summary>
 
-提示词要求模型“边搜边交”，循环会在预算用到 60% 和 85% 时，把预算提醒直接注入给模型。如果确实需要更多预算，可以调大 `PAPERLENS_MAX_TOOL_CALLS`，并同时调大 `PAPERLENS_WALL_CLOCK_SECONDS`。
+提示词要求模型“边搜边交”，循环会在预算用到 60% 和 85% 时，把预算提醒直接注入给模型。如果确实需要更多预算，可以调大 `PAPER2CODE_MAX_TOOL_CALLS`，并同时调大 `PAPER2CODE_WALL_CLOCK_SECONDS`。
 </details>
 
 <details>

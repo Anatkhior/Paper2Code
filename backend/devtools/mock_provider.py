@@ -582,6 +582,16 @@ def chat_action(messages: list[dict[str, Any]], model: str, tool_names: list[str
         "## 之前的对话" in (m.get("content") or "") for m in messages if m.get("role") == "user"
     )
 
+    if not tool_names:
+        if "chat-empty-answer" in model:
+            return _text_chunks(("",))
+        return _text_chunks(("查阅预算已收束。" if "chatty" in model else "", _chat_answer(with_citation=False, saw_history=saw_history)))
+
+    if "chat-finish-intro" in model or "chat-empty-answer" in model:
+        return _text_chunks(("下面给初学者一份完整导读。",))[:-1] + _tool_call_chunks(
+            "call_chat_finish", "finish", {"coverage_note": "已读资料，准备回答"}
+        )
+
     if "read_file" not in tool_names:
         # 还没克隆仓库 / 没读过论文时，只能凭已有产物回答
         return _text_chunks((_chat_answer(with_citation=False, saw_history=saw_history),))
@@ -620,7 +630,7 @@ def _choose(messages: list[dict[str, Any]], model: str, tool_names: list[str]) -
     # 不区分的话，没克隆仓库的追问会掉进侦察剧本、一直调用 record_plan 直到把预算烧光
     # （2026-09-17 实测：回答变成"这次没能在预算内给出回答"）。
     looks_like_chat = any("## 已有的分析结果" in str(m.get("content") or "") for m in messages)
-    if "list_pages" in tool_names and ("repo_tree" in tool_names or looks_like_chat):
+    if looks_like_chat or ("list_pages" in tool_names and "repo_tree" in tool_names):
         return chat_action(messages, model, tool_names)
 
     if "repo_tree" in tool_names:

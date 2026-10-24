@@ -68,7 +68,7 @@ stop_one() {
 }
 
 start_backend() {
-  (cd "$BACKEND_DIR" && PYTHONPATH="$BACKEND_DIR" PAPERLENS_ALLOW_LOCAL_REPO_PATHS=true \
+  (cd "$BACKEND_DIR" && PYTHONPATH="$BACKEND_DIR" PAPER2CODE_ALLOW_LOCAL_REPO_PATHS=true \
     nohup "$PY" -m uvicorn app.main:app --port 8000 --log-level warning \
     > "$LOG_DIR/backend.log" 2>&1 &)
   echo "  后端     : http://127.0.0.1:8000  （本地仓库开关已打开，日志 .dev-logs/backend.log）"

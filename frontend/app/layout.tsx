@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "PaperLens — 论文-代码智能解读",
+  title: "Paper2code — 论文-代码智能解读",
   description: "上传论文与仓库，由 Agent 自主探索定位实现，引用可机械核验。",
 };
 

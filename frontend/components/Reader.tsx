@@ -1,6 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
+
+const PdfPage = dynamic(() => import("./PdfPage"), { ssr: false });
 import { highlightCode } from "@/lib/syntax";
 import Markdown from "@/components/Markdown";
 import { placeCodeAnnotations, type CodeAnnotation, type WalkthroughStep } from "@/lib/codeAnnotations";
@@ -108,7 +111,9 @@ export default function Reader({
     path: right.path, start: right.lines[0].n, end: right.lines[right.lines.length - 1].n, total: right.total,
   } : null), [walkthrough, right]);
   const paperBodyRef = useRef<HTMLDivElement>(null);
-  const [selection, setSelection] = useState<{ text: string; x: number; y: number } | null>(null);
+  const selectionOwner = JSON.stringify([pdfUrl, left?.page, left?.quote, paperMode, paperZoom]);
+  const [selection, setSelection] = useState<{ text: string; x: number; y: number; page: number; owner: string } | null>(null);
+  const currentSelection = selection?.owner === selectionOwner ? selection : null;
   const quoteParts = useMemo(
     () => (left?.text ? locateQuote(left.text, left.quote) : null),
     [left],
@@ -141,25 +146,38 @@ export default function Reader({
    * 划选一段原文 → 弹出「以此为目标」。
    * 只认**左栏里**的选中内容：右栏是代码，划选它不该触发这个动作。
    */
-  const handleMouseUp = useCallback(() => {
+  const handleSelection = useCallback(() => {
     const active = window.getSelection();
     const text = active?.toString().trim() ?? "";
-    const anchor = active?.anchorNode ?? null;
-    if (!text || text.length < 8 || !paperBodyRef.current || !anchor) {
+    const container = paperMode === "pdf" ? pdfSurfaceRef.current?.querySelector(".textLayer") : paperBodyRef.current;
+    if (!active?.rangeCount || text.length < 8 || !container || !left) {
       setSelection(null);
       return;
     }
-    if (!paperBodyRef.current.contains(anchor)) {
+    const range = active.getRangeAt(0);
+    if (!container.contains(range.startContainer) || !container.contains(range.endContainer)) {
       setSelection(null);
       return;
     }
-    const rect = active && active.rangeCount > 0 ? active.getRangeAt(0).getBoundingClientRect() : null;
+    const rect = range.getBoundingClientRect();
     setSelection({
-      text: text.slice(0, 1200),
-      x: rect ? Math.min(Math.max(rect.left + rect.width / 2, 90), window.innerWidth - 90) : 180,
-      y: rect ? rect.top : 120,
+      text, page: left.page, owner: selectionOwner,
+      x: Math.min(Math.max(rect.left + rect.width / 2, 130), window.innerWidth - 130), y: rect.top,
     });
-  }, []);
+  }, [left, paperMode, selectionOwner]);
+
+  useEffect(() => {
+    window.getSelection()?.removeAllRanges();
+    const changed = () => handleSelection();
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { setSelection(null); window.getSelection()?.removeAllRanges(); }
+    };
+    const clearOnScroll = () => setSelection(null);
+    document.addEventListener("scroll", clearOnScroll, true);
+    document.addEventListener("selectionchange", changed);
+    document.addEventListener("keydown", escape);
+    return () => { document.removeEventListener("scroll", clearOnScroll, true); document.removeEventListener("selectionchange", changed); document.removeEventListener("keydown", escape); };
+  }, [handleSelection]);
 
   // 高亮与无边框图像共享同一坐标面，所有矩形随页面等比例缩放。
   const pageWidth = left?.pageWidth ?? 0;
@@ -199,24 +217,26 @@ export default function Reader({
         <button type="button" aria-pressed={activeTab === "paper"} aria-controls="paper-pane" onClick={() => onTabChange("paper")} className="reader-tab">论文原文</button>
         <button type="button" aria-pressed={activeTab === "code"} aria-controls="code-pane" onClick={() => onTabChange("code")} className="reader-tab">代码实现</button>
       </div>
-      <div className="grid items-start gap-3 lg:grid-cols-2" onMouseUp={handleMouseUp}>
-      {selection && onSelectTarget && (
+      <div className="grid items-start gap-3 lg:grid-cols-2" onPointerUp={handleSelection} onKeyUp={handleSelection}>
+      {currentSelection && onSelectTarget && (
         <button
           type="button"
           style={{
             position: "fixed",
-            left: selection.x,
-            top: Math.max(8, selection.y - 44),
+            left: currentSelection.x,
+            top: Math.max(8, currentSelection.y - 44),
             transform: "translateX(-50%)",
           }}
           className="z-40 rounded-md bg-neutral-900 px-3 py-1.5 text-xs font-medium text-white shadow-lg dark:bg-neutral-100 dark:text-neutral-900"
+          onPointerDown={(event) => event.preventDefault()}
+          disabled={currentSelection.text.length > 1200}
           onClick={() => {
-            onSelectTarget(selection.text, left?.page ?? 1);
+            onSelectTarget(currentSelection.text, currentSelection.page);
             setSelection(null);
             window.getSelection()?.removeAllRanges();
           }}
         >
-          以此为目标定位代码
+          {currentSelection.text.length > 1200 ? "选段超过 1200 字，请缩短后重试" : "以此为目标定位代码"}
         </button>
       )}
       <section id="paper-pane" className={`reader-pane rounded-xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950 ${activeTab !== "paper" ? "reader-mobile-hidden" : ""}`}>
@@ -232,7 +252,7 @@ export default function Reader({
         </header>
         <div className="flex flex-wrap items-center gap-1 border-b border-neutral-200 px-3 py-1 dark:border-neutral-800" role="group" aria-label="原文格式">
           <button type="button" aria-pressed={paperMode === "pdf"} onClick={() => setPaperMode("pdf")} className="reader-tab">PDF 原版</button>
-          <button type="button" aria-pressed={paperMode === "text"} onClick={() => setPaperMode("text")} className="reader-tab">原文文本（可划选）</button>
+          <button type="button" aria-pressed={paperMode === "text"} onClick={() => setPaperMode("text")} className="reader-tab">原文文本（备用）</button>
           {paperMode === "pdf" && <button type="button" aria-label={paperZoom === 1 ? "放大原文（两倍）" : "原文适合宽度"} onClick={() => setPaperZoom(paperZoom === 1 ? 2 : 1)} className="reader-control">{paperZoom === 1 ? "放大" : "适合宽度"}</button>}
           {pdfUrl && <a href={`${pdfUrl}#page=${left?.page ?? 1}`} target="_blank" rel="noreferrer" className="ml-auto py-2 text-xs text-teal-700 underline underline-offset-4 dark:text-teal-300">打开 PDF</a>}
         </div>
@@ -241,14 +261,14 @@ export default function Reader({
         {left?.error && <p className="p-4 text-sm text-red-600" role="alert">{left.error}</p>}
         {left && !left.loading && !left.error && <>
           <p className="px-3 py-2 text-xs text-neutral-500">
-            {paperMode === "text" ? "划选一段原文，可将它加入定位目标。" : !left.quote ? "浏览论文，或选择创新点查看引用位置。" : highlightStyles.length === 0 ? "本页未定位到这段引文，可切换原文文本核对。" : (left.coverage ?? 1) < 0.999 ? `引文已高亮约 ${Math.round((left.coverage ?? 0) * 100)}%，部分公式或符号未匹配。` : "引文已高亮"}
+            {paperMode === "text" ? "划选一段原文，可将它加入定位目标。" : !left.quote ? "直接划选 PDF 原文，可将它加入定位目标。" : highlightStyles.length === 0 ? "本页未定位到这段引文，可切换原文文本核对。" : (left.coverage ?? 1) < 0.999 ? `引文已高亮约 ${Math.round((left.coverage ?? 0) * 100)}%，部分公式或符号未匹配。` : "引文已高亮"}
           </p>
           {paperMode === "pdf" && <div ref={pdfBoxRef} className="reader-body min-h-0 bg-neutral-100 p-2 dark:bg-neutral-900">
             {imageUrl && <div style={{ width: `${paperZoom * 100}%` }} className="mx-auto overflow-hidden rounded border border-neutral-300 dark:border-neutral-700">
               <div ref={pdfSurfaceRef} className="pdf-surface relative">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={imageUrl} alt={`论文第 ${left.page} 页`} width={pageWidth || undefined} height={pageHeight || undefined} onLoad={centerPdf} className="block h-auto w-full bg-white" />
-                {highlightStyles.map((style, index) => <span key={index} ref={index === 0 ? pdfMarkRef : undefined} className="pdf-highlight pointer-events-none absolute bg-amber-300/35" style={style} aria-hidden />)}
+                {pdfUrl ? <PdfPage url={pdfUrl} page={left.page} fallbackUrl={imageUrl} onReady={centerPdf}>
+                  {highlightStyles.map((style, index) => <span key={index} ref={index === 0 ? pdfMarkRef : undefined} className="pdf-highlight pointer-events-none absolute bg-amber-300/35" style={style} aria-hidden />)}
+                </PdfPage> : <p className="p-3 text-sm">没有可用的 PDF，请重新上传。</p>}
               </div>
             </div>}
           </div>}

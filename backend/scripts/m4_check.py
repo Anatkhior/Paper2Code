@@ -236,15 +236,10 @@ def section_b(check: Checker) -> list[dict[str, Any]]:
 
         frozen = (entry.get("repo") or {}).get("commit_sha")
         check(bool(frozen), f"[{entry['id']}] 冻结了 commit（标注纪律的硬要求）")
-        url = entry["repo"]["url"]
-        if not url.startswith("https://"):
-            result = subprocess.run(
-                ["git", "rev-parse", "HEAD"], cwd=ROOT / url, capture_output=True, text=True, timeout=20
-            )
-            check(
-                result.stdout.strip() == frozen,
-                f"[{entry['id']}] 本地仓库 HEAD 与冻结 commit 一致（{frozen[:12]}…）",
-            )
+        from eval.run_eval import check_frozen_commit, resolve_repo_url
+
+        ok, message = check_frozen_commit(entry, resolve_repo_url(entry))
+        check(ok, f"[{entry['id']}] {message}")
     return goldset
 
 
@@ -274,6 +269,11 @@ def section_c(check: Checker) -> dict[str, Any]:
 
     pair = payload["pairs"][0]
     check("per_innovation" in pair and len(pair["per_innovation"]) >= 1, "明细里逐条列出了标注与产出的对应关系")
+    check(pair["status"] == "ok" and pair["commit_sha"] == pair["expected_commit_sha"], "实际评估版本与冻结版本一致")
+    check(set(pair["phases"]) == {"recon", "locate"}, "侦察与定位的结束原因、用量分开留档")
+    check(pair["usage"]["input_tokens"] > 0 and pair["usage_complete"], "记录完整的两阶段 token 用量")
+    check("partial" in pair and pair["wall_clock_seconds"] > 0, "记录提前交付标记与整篇耗时")
+    check(summary["pairs_attempted"] == summary["pairs_requested"] == summary["pairs"], "汇总明确列出已评分/已尝试/请求篇数")
     check(pair["citations"]["total"] >= 1, f"{pair['citations']['total']} 条引用进入了统计")
     check("api_key" not in json.dumps(payload), "报告里没有泄漏 api_key")
     check(REPORT_MD.exists() and "引用可核验率" in REPORT_MD.read_text(encoding="utf-8"), "生成了 Markdown 表格")
@@ -306,10 +306,21 @@ def section_d(check: Checker, payload: dict[str, Any]) -> None:
     )
 
 
+def section_e(check: Checker) -> None:
+    check.section("E. 真实评估路径离线回归（固定版本、限流、报告隔离、逐篇失败）")
+    result = subprocess.run(
+        [sys.executable, "-m", "unittest", "tests.test_eval_pipeline", "-v"],
+        cwd=ROOT, capture_output=True, text=True, timeout=180,
+    )
+    print((result.stdout + result.stderr)[-5000:], flush=True)
+    check(result.returncode == 0, "真实评估路径回归测试全部通过（没有调用付费模型）")
+
+
 def main() -> int:
     check = Checker("M4 验收")
     section_a(check)
     section_b(check)
+    section_e(check)
     payload = section_c(check)
     section_d(check, payload)
     return check.finish()

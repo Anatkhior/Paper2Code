@@ -1,4 +1,4 @@
-# PaperLens v0 规格
+# Paper2code v0 规格
 
 > 本文档是 grilling 收敛后的结果，不是愿望清单。v0 只有一个目标：
 > **证明"论文创新点 → 可核验代码引用"这条链路成立，并且能用数字衡量它有多准。**
@@ -157,14 +157,14 @@ resp = litellm.completion(
     messages=messages,
     tools=tool_schemas,
     stream=True,
-    extra_headers={"User-Agent": settings.http_user_agent},   # 默认 "PaperLens/0.1"，可配
+    extra_headers={"User-Agent": settings.http_user_agent},   # 默认 "Paper2code/0.1"，可配
 )
 ```
 
 **为什么 User-Agent 要可配**（2026-09-13 实测）：个别套 Cloudflare 的第三方网关按 UA 把
 openai-python SDK 形状的请求当 bot 直接 403（同 key 同请求体：SDK UA → 403 HTML，
 自定义 UA / 浏览器 UA → 正常 JSON），请求根本到不了模型。所以 LLM 请求与端点探测
-统一带 `PAPERLENS_HTTP_USER_AGENT`（默认 `PaperLens/0.1`，实测可通过；官方端点对 UA 无感），
+统一带 `PAPER2CODE_HTTP_USER_AGENT`（默认 `Paper2code/0.1`，实测可通过；官方端点对 UA 无感），
 自检的 HTML 错误页诊断里会提示这个开关。
 
 **启动自检（必须做，否则整套架构会静默失效）**：分析开始前先跑一个两轮工具调用冒烟测试——
@@ -321,7 +321,7 @@ openai-python SDK 形状的请求当 bot 直接 403（同 key 同请求体：SDK
      `response.completion_stream.response.headers` 取，异常要从 `exc.litellm_response_headers` 取
      —— `exc.response.headers` 是空的（实测，写错过一次）。
   2. **网关话术**：`1分钟内最多请求10次` / `200000 tokens per minute`（中英文、双向语序都认）。
-  3. **配置**：`PAPERLENS_LLM_MAX_REQUESTS_PER_MINUTE=N`（兜底，不再是必须）。
+  3. **配置**：`PAPER2CODE_LLM_MAX_REQUESTS_PER_MINUTE=N`（兜底，不再是必须）。
   4. **兜底阶梯**：窗口感知（10s 起、翻倍到 90s），并按**总等待预算**（180s）而不是「重试 5 次」计数。
   - **TPM 单独处理**：token/分钟 的限制靠拉长请求间隔没用 → 按最近 60s 已发送 token 节流
     （`_await_llm_slot` 的 token 分支），并且只重试一次（反复空等没有意义）。
@@ -411,15 +411,17 @@ openai-python SDK 形状的请求当 bot 直接 403（同 key 同请求体：SDK
   轨迹默认展开、保存用户选择；覆盖率、用量和 commit 在可展开统计区内。
 - **自动滚动只动自己的容器**：阅读器高亮、时间线与追问的新消息不拉动窗口；点击引用时才主动定位到阅读器。
 - **自检结果分级显示**：通过时只留诊断句，不通过才展开端点与调用细节。
-- **高亮要如实报告覆盖了多少**：引文里混着公式/符号时，PDF 文本层往往逐字匹配不上。
-  `quote_rects` 是两级策略：① 字符串快路径（整段 → 8 词滑窗）；② **按词的几何序列匹配**
-  —— 逐词找位置，再按读序（同行看 x、换行看行距）串起来，找不到的词（公式）跳过但不中断；
-  覆盖率按**命中词下标集合**算（滑窗重叠，累加长度会把覆盖率算爆——踩过）。
-  为什么必须有第二级：真论文里的连字符折行、非 ASCII 空格、两端对齐拉伸、双栏换列
-  都会让"整段/整窗"字符串匹配失败，于是只亮出前半截（2026-09-17 用户实测）。
-  几何匹配还带**防误报阈值**（覆盖率 ≥0.5 且最长连续命中 ≥4）——否则 "definitely not on this
-  page" 这种常见词拼出来的假引文也会被串出一堆框。覆盖率 <1 时前端明说"只覆盖了约 N%，
-  完整引文请看「原文文本」"，**不假装整段都高亮了**。
+- **高亮来自同一次引文出现**：`paper_highlight.py` 从 PDF 字符层保留文字、行和坐标的对应，
+  规范化空白、Unicode 连字与断行连字符后匹配连续 token，重复引文只取一次。
+  不再把全页滑窗/逐词搜索的散落命中拼起来，也不跨行、跨栏或跨未匹配片段合并矩形。
+  不完整引文至少需要四个连续词作锚点；仅在同一文本块内接续相邻匹配，
+  引文与原页的公式/损坏文本间隙各不超过 12 token，且不跳过原页独有的额外正文。
+  覆盖率是实际显示的规范化非空白字符 / 引文字符；不足 50% 不画框，矩形数受限时也下调覆盖率。
+  不确定的公式或符号保留空缺并显示部分匹配。提示文案位于图像坐标面外，不影响缩放定位。
+- **解析语言**：默认 `zh-CN`，可选择 `en`，浏览器保存偏好；每次生成请求传入 `output_language`。
+  后端使用统一语言指令约束侦察、定位全部解释字段（尤其逐段代码讲解）及追问正文。
+  语言写入 run 元数据、事件及新交付物；省略参数沿用 run 设置，旧记录缺少该字段时默认中文。
+  更改语言只作用于新生成内容，保留旧结果、论文引文、代码标识符、公式符号与引用路径。
 - **模型写的是 markdown，界面就必须渲染它**：追问回答与结论解释都交给
   `frontend/components/Markdown.tsx`（自写的极简渲染器：粗体/斜体/行内代码/链接/列表/引用/代码块/标题）。
   为什么自己写而不引第三方库：这些文本是**模型产出且会引用论文/代码里的不可信内容**，
@@ -453,8 +455,8 @@ openai-python SDK 形状的请求当 bot 直接 403（同 key 同请求体：SDK
 - `git -c core.hooksPath=/dev/null clone --depth 1 --no-tags --single-branch <url>`
 - **只取"源码视图"（2026-09-14 重做）**：`--filter=blob:none`（只要提交与目录树）+ `--sparse`
   （只检出源码类文件），排除规则 = `SKIP_DIRS` + `BINARY_SUFFIXES` + 仓库 `.gitattributes` 里
-  声明为 `binary`/`filter=lfs` 的模式 + `PAPERLENS_REPO_SPARSE_EXCLUDE`。用
-  `PAPERLENS_REPO_SPARSE=false` 退回全量克隆。
+  声明为 `binary`/`filter=lfs` 的模式 + `PAPER2CODE_REPO_SPARSE_EXCLUDE`。用
+  `PAPER2CODE_REPO_SPARSE=false` 退回全量克隆。
   起因：原来 `--depth 1` 全量检出 + "体积上限当代码规模上限"，实测 `zju3dv/INTACT-JEPA`
   为了读 121 个文本文件（1.8MB）下载了 **237MB**（工作区 140MB 里 6 个 `docs/assets/*.mp4`
   演示视频占 83MB，另有 `.git` 97MB 是同一份内容的第二份拷贝）→ 直接撞 200MB 上限被拒。
@@ -475,15 +477,15 @@ openai-python SDK 形状的请求当 bot 直接 403（同 key 同请求体：SDK
   `insteadOf`（内网镜像）才能克隆；隔离掉他们**永远跑不通且报错指不到真因**
   （实测：`GIT_CONFIG_GLOBAL=/dev/null` 下 `git config --global --get http.proxy` 读不到）。
   `hosted` 才设 `GIT_CONFIG_GLOBAL=/dev/null` + `GIT_CONFIG_NOSYSTEM=1`（防 `insteadOf`
-  把白名单域名改指向别处）。用 `PAPERLENS_REPO_ISOLATE_GIT_CONFIG` 可显式覆盖。
+  把白名单域名改指向别处）。用 `PAPER2CODE_REPO_ISOLATE_GIT_CONFIG` 可显式覆盖。
 - 超时（默认 300s——2026-09-13 从 60s 放宽：实测经本机代理克隆 GitHub，7MB 小仓库
-  的下载也会超过 60s；可用 `PAPERLENS_REPO_CLONE_TIMEOUT_SECONDS` 调整）+ 克隆后 `du` 检查大小上限（默认 200MB）
+  的下载也会超过 60s；可用 `PAPER2CODE_REPO_CLONE_TIMEOUT_SECONDS` 调整）+ 克隆后 `du` 检查大小上限（默认 200MB）
 - **克隆进度可视化**（2026-09-13 补）：`git clone --progress` 的 stderr 按行（兼容 `\r` 刷新）实时转发为 `clone_progress` 事件，慢下载不再是黑盒；克隆在线程池里跑，不再阻塞事件循环。
 **定位可重入**（2026-09-12 补）：同一个 run 第二次点「开始定位」（换勾选、划选补目标、失败重试）
   时，`clone_repo(..., overwrite=True)` 先清掉旧的 `repo/` 再重新克隆——`repo/` 是派生数据，
   重新克隆没有信息损失；没有这条路径，第二次定位永远撞「目标目录已存在」
 - **URL 白名单**：仅 `https://`；主机白名单默认 `github.com` / `gitlab.com`，条目可写
-  `host:port`（自建 GitLab 常用 8443），用 `PAPERLENS_REPO_ALLOWED_HOSTS` 覆盖
+  `host:port`（自建 GitLab 常用 8443），用 `PAPER2CODE_REPO_ALLOWED_HOSTS` 覆盖
   （接受逗号分隔或 JSON；报错文案会给出可直接复制的写法）
 - **SSRF 守卫的判据（2026-09-14 重做）**：原来拿"本机 DNS 的答案"一票否决，但挂了 TUN +
   fake-ip 的代理（Clash/Mihomo/sing-box/Surge）或企业分流 DNS 时，**本机解析结果是代理
@@ -491,17 +493,17 @@ openai-python SDK 形状的请求当 bot 直接 403（同 key 同请求体：SDK
   `git ls-remote` 与真克隆都正常）。而且"猜网段"不泛化：198.18/15 被拦、28/8 侥幸放过、
   240/4 被拦、NAT64 的 `64:ff9b::/96` 因 `is_reserved` 也被拦——同类使用者的命运取决于
   代理厂商设了什么段。改成三层：
-  1. **部署模式决定严格度**：`PAPERLENS_REPO_NETWORK_MODE=local`（默认，单机自用）只拒绝
+  1. **部署模式决定严格度**：`PAPER2CODE_REPO_NETWORK_MODE=local`（默认，单机自用）只拒绝
      回环/链路本地/组播/未指定这类"绝不可能是代码托管站"的地址（云元数据
      `169.254.169.254` 就在链路本地段里），非公网解析结果只记提示、不阻断；
      `hosted`（公网多租户）把非公网解析结果当拒绝项。
-  2. **DoH 交叉核验**（`PAPERLENS_REPO_DNS_CROSSCHECK=auto|on|off`，端点
-     `PAPERLENS_REPO_DOH_ENDPOINTS`）：需要判定时，用 **literal-IP** 的公网 DoH 端点核验
+  2. **DoH 交叉核验**（`PAPER2CODE_REPO_DNS_CROSSCHECK=auto|on|off`，端点
+     `PAPER2CODE_REPO_DOH_ENDPOINTS`）：需要判定时，用 **literal-IP** 的公网 DoH 端点核验
      "这个域名在公网的真实归属"，区分"代理占位符"和"真内网目标"——与厂商、网段、IP 族无关
      （NAT64、240/4、自定义 fake-ip 段都覆盖）。同域名同时解析出公网+非公网地址按
      rebinding 特征拒绝。
-  3. **显式信任**：`PAPERLENS_REPO_ALLOW_CIDRS` 列出信任的网段（企业内网镜像、已知 fake-ip
-     段）；`PAPERLENS_REPO_ALLOW_PRIVATE_IPS=true` 作为粗粒度兼容开关保留。
+  3. **显式信任**：`PAPER2CODE_REPO_ALLOW_CIDRS` 列出信任的网段（企业内网镜像、已知 fake-ip
+     段）；`PAPER2CODE_REPO_ALLOW_PRIVATE_IPS=true` 作为粗粒度兼容开关保留。
   环境里存在 `HTTPS_PROXY`/`ALL_PROXY` 等正向代理时跳过本机 DNS 判定（域名由代理解析，
   本机答案不代表目的地）。判定过程与结论（notes）写进 run meta 并显示在前端时间线上。
   **注意：进程内的 DNS 检查不是安全边界**（DNS rebinding 可绕）——**公网多租户部署必须

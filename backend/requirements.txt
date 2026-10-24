@@ -1,4 +1,4 @@
-# PaperLens backend — v0 依赖（全部锁精确版本；升级必须单独一次提交并重跑 gold set）
+# Paper2code backend — v0 依赖（全部锁精确版本；升级必须单独一次提交并重跑 gold set）
 # 注意：所有依赖的 requires_python 都是 >=3.10，本机 Python 3.10.12 可直接使用。
 
 fastapi==0.141.1

@@ -22,6 +22,7 @@ import ipaddress
 import json
 import os
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -243,7 +244,7 @@ async def section_a(check: Checker) -> dict[str, Any]:
         notes = validate_repo_url("https://github.com/x/y")   # DoH 此时仍是 None：证明放行来自显式信任
         check(
             any("显式信任" in note for note in notes),
-            "hosted + PAPERLENS_REPO_ALLOW_CIDRS 显式信任的网段直接放行（不依赖 DoH）",
+            "hosted + PAPER2CODE_REPO_ALLOW_CIDRS 显式信任的网段直接放行（不依赖 DoH）",
         )
         settings.repo_network_mode = "local"
         settings.repo_allow_cidrs = ["127.0.0.0/8"]
@@ -271,7 +272,7 @@ async def section_a(check: Checker) -> dict[str, Any]:
         notes = validate_repo_url("https://github.com/x/y")
         check(
             any("ALLOW_PRIVATE_IPS" in note for note in notes),
-            "旧开关 PAPERLENS_REPO_ALLOW_PRIVATE_IPS=true 仍然放行一切（兼容，已标注为粗粒度）",
+            "旧开关 PAPER2CODE_REPO_ALLOW_PRIVATE_IPS=true 仍然放行一切（兼容，已标注为粗粒度）",
         )
         settings.repo_allow_private_ips = False
 
@@ -286,14 +287,14 @@ async def section_a(check: Checker) -> dict[str, Any]:
         except RepoError as exc:
             port_error = str(exc)
         check(
-            "PAPERLENS_REPO_ALLOWED_HOSTS=" in port_error and "forge.local:443" in port_error,
+            "PAPER2CODE_REPO_ALLOWED_HOSTS=" in port_error and "forge.local:443" in port_error,
             "未声明的端口被拒绝，文案给出可直接复制的 host:port 写法",
         )
         await expect_error(
             check,
             lambda: validate_repo_url("https://gitee.com/x/y"),
             "非白名单域名的文案给出可直接复制的覆盖方法",
-            "PAPERLENS_REPO_ALLOWED_HOSTS=",
+            "PAPER2CODE_REPO_ALLOWED_HOSTS=",
         )
 
         # (7) git 配置隔离：跟部署模式走（local 继承，hosted 隔离）
@@ -314,7 +315,7 @@ async def section_a(check: Checker) -> dict[str, Any]:
         settings.repo_network_mode = "local"
         check(
             _git_env().get("GIT_CONFIG_GLOBAL") == "/dev/null",
-            "PAPERLENS_REPO_ISOLATE_GIT_CONFIG 可显式覆盖模式默认值",
+            "PAPER2CODE_REPO_ISOLATE_GIT_CONFIG 可显式覆盖模式默认值",
         )
 
         # (8) DoH 响应解析（纯函数，离线）
@@ -339,7 +340,7 @@ async def section_a(check: Checker) -> dict[str, Any]:
         check(
             tolerant.repo_allowed_hosts == ["github.com", "gitee.com"]
             and tolerant.repo_allow_cidrs == ["198.18.0.0/15", "10.20.0.0/16"],
-            "list 型配置同时接受逗号分隔与 JSON（PAPERLENS_REPO_ALLOWED_HOSTS=a,b 不再让后端启动失败）",
+            "list 型配置同时接受逗号分隔与 JSON（PAPER2CODE_REPO_ALLOWED_HOSTS=a,b 不再让后端启动失败）",
         )
     finally:
         repo_source.resolve_host_addresses = real_resolve
@@ -383,7 +384,7 @@ async def section_a(check: Checker) -> dict[str, Any]:
     # 视频 83MB + .git 97MB）。所以现在只取"源码视图"，并且把口径拆开如实上报。
     check(
         settings.repo_sparse is True,
-        "默认启用源码视图克隆（PAPERLENS_REPO_SPARSE=true）",
+        "默认启用源码视图克隆（PAPER2CODE_REPO_SPARSE=true）",
     )
     patterns = sparse_exclude_patterns(clone_dir)
     check(
@@ -1301,18 +1302,53 @@ async def section_d(check: Checker, prepared_run_id: str) -> None:
         shutil.rmtree(target, ignore_errors=True)
 
 
+async def section_k(check: Checker, client: httpx.AsyncClient) -> None:
+    from app.repo_source import run_git
+    from tests.repo_fixture import FILES
+
+    check.section("K. 指定旧提交：API → 克隆 → 核验产物（不能静默使用 HEAD）")
+    with tempfile.TemporaryDirectory(prefix="paper2code-pinned-") as temp:
+        source = build_mini_repo(Path(temp) / "repo", FILES)
+        frozen = run_git(["rev-parse", "HEAD"], cwd=source).stdout.strip()
+        (source / "loralib/layers.py").write_text("# upstream replaced the implementation\n", encoding="utf-8")
+        commit_all(source)
+        latest = run_git(["rev-parse", "HEAD"], cwd=source).stdout.strip()
+        check(frozen != latest, "夹具上游已前进到另一个提交")
+        run_id = await prepare_run(client, check, "mock-model")
+        for invalid in ("main", "abc123", "--help"):
+            response = await client.post(f"/api/runs/{run_id}/locate", json={
+                "provider": provider("mock-model"), "repo_url": str(source), "commit": invalid,
+            })
+            check(response.status_code == 422, f"非法 commit {invalid!r} 在 API 层被拒绝")
+        baseline = await current_max_event_id(client, run_id)
+        response = await client.post(f"/api/runs/{run_id}/locate", json={
+            "provider": provider("mock-model"), "repo_url": str(source), "commit": frozen,
+        })
+        check(response.status_code == 200, "定位接口接受完整的冻结 SHA")
+        events, _, _ = await collect_sse(
+            client, f"/api/runs/{run_id}/events?from_id={baseline}", since_id=baseline, timeout_s=240,
+        )
+        ready = events_of(events, "repo_ready")
+        check(bool(ready) and ready[0]["data"]["repo"]["commit_sha"] == frozen, "repo_ready 是指定的旧提交，而不是上游 HEAD")
+        detail = (await client.get(f"/api/runs/{run_id}")).json()
+        artifact = detail.get("artifact") or {}
+        check(artifact.get("run", {}).get("repo", {}).get("commit_sha") == frozen, "最终产物锁定旧提交")
+        check(artifact.get("verification", {}).get("citation_verifiable_rate") == 1.0, "旧提交上的引用仍然全部通过机械核验")
+        check(detail.get("meta", {}).get("repo_commit") == frozen, "运行元数据记录了请求的冻结提交")
+
+
 async def main() -> int:
     check = Checker("M2 验收")
     mock = start_service("devtools.mock_provider:app", MOCK_PORT)
     app_proc = start_service(
         "app.main:app",
         APP_PORT,
-        extra_env={"PAPERLENS_ALLOW_LOCAL_REPO_PATHS": "true"},  # 本地夹具仓库需要这个开关
+        extra_env={"PAPER2CODE_ALLOW_LOCAL_REPO_PATHS": "true"},  # 本地夹具仓库需要这个开关
     )
     try:
         await wait_http(f"http://127.0.0.1:{MOCK_PORT}/health")
         await wait_http(f"{APP}/api/health")
-        print(f"mock provider : {MOCK_PORT}\nPaperLens API : {APP}", flush=True)
+        print(f"mock provider : {MOCK_PORT}\nPaper2code API : {APP}", flush=True)
 
         await section_a(check)
 
@@ -1324,6 +1360,7 @@ async def main() -> int:
             await section_e(check, client)
             await section_f(check, client)
             await section_g(check, client)
+            await section_k(check, client)
             # 顺序有讲究：J（预算可见）放在 I（限流）之前——I 会让后端进程学到 6s/次的节奏，
             # 后面的用例会被跟着限速（实测 J 的 ~30 次调用因此超过 120s 读流超时）。
             await section_j(check, client)

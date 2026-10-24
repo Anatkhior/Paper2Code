@@ -15,7 +15,7 @@ import os
 import subprocess
 from pathlib import Path
 
-LAYERS_PY = '''"""A tiny LoRA-style reparameterization, written for the PaperLens fixture."""
+LAYERS_PY = '''"""A tiny LoRA-style reparameterization, written for the Paper2code fixture."""
 
 import math
 
@@ -89,7 +89,7 @@ if __name__ == "__main__":
 
 README_MD = """# sample-repo
 
-PaperLens 的测试仓库。它只用来说明"低秩重参数化"怎么落地，**没有**实现冻结主干。
+Paper2code 的测试仓库。它只用来说明"低秩重参数化"怎么落地，**没有**实现冻结主干。
 """
 
 REQUIREMENTS = "torch>=2.0\n"
@@ -193,9 +193,9 @@ def commit_all(path: Path) -> Path:
     """把 path 里的现有文件 git init + 提交一次（作者/时间写死，commit 可复现）。"""
     env = {
         **os.environ,
-        "GIT_AUTHOR_NAME": "PaperLens Fixture",
+        "GIT_AUTHOR_NAME": "Paper2code Fixture",
         "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
-        "GIT_COMMITTER_NAME": "PaperLens Fixture",
+        "GIT_COMMITTER_NAME": "Paper2code Fixture",
         "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
         "GIT_AUTHOR_DATE": "2026-01-01T00:00:00+00:00",
         "GIT_COMMITTER_DATE": "2026-01-01T00:00:00+00:00",

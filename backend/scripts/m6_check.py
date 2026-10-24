@@ -7,7 +7,7 @@ C. 界面上有入口：划选提示常驻、清单里能区分"你添加的"目
 
 运行：
     cd backend && .venv/bin/python -m scripts.m6_check
-    PAPERLENS_SKIP_FRONTEND=1 ...   # 只跑接口与端到端，跳过前端构建
+    PAPER2CODE_SKIP_FRONTEND=1 ...   # 只跑接口与端到端，跳过前端构建
 """
 
 from __future__ import annotations
@@ -266,15 +266,15 @@ async def section_b(check: Checker, client: httpx.AsyncClient) -> None:
 # ---------------------------------------------------------------------------
 async def section_c(check: Checker) -> None:
     check.section("C. 界面：划选入口与'你添加的'标记")
-    if os.environ.get("PAPERLENS_SKIP_FRONTEND"):
-        print("   （PAPERLENS_SKIP_FRONTEND 已设置，跳过）", flush=True)
+    if os.environ.get("PAPER2CODE_SKIP_FRONTEND"):
+        print("   （PAPER2CODE_SKIP_FRONTEND 已设置，跳过）", flush=True)
         return
     if not (FRONTEND / "node_modules").exists() or not shutil.which("pnpm"):
         check(False, "前端依赖或 pnpm 不可用")
         return
 
     syntax = subprocess.run(
-        ["node", "--test", "lib/syntax.test.mjs", "lib/codeAnnotations.test.mjs", "lib/markdownBlocks.test.mjs"],
+        ["node", "--test", "lib/syntax.test.mjs", "lib/codeAnnotations.test.mjs", "lib/markdownBlocks.test.mjs", "lib/chatState.test.mjs"],
         cwd=FRONTEND, capture_output=True, text=True, timeout=60,
     )
     check(
@@ -444,12 +444,12 @@ async def main() -> int:
     check = Checker("阶段②（划选→定位目标）验收")
     mock = start_service("devtools.mock_provider:app", MOCK_PORT)
     app_proc = start_service(
-        "app.main:app", APP_PORT, extra_env={"PAPERLENS_ALLOW_LOCAL_REPO_PATHS": "true"}
+        "app.main:app", APP_PORT, extra_env={"PAPER2CODE_ALLOW_LOCAL_REPO_PATHS": "true"}
     )
     try:
         await wait_http(f"http://127.0.0.1:{MOCK_PORT}/health")
         await wait_http(f"{APP}/api/health")
-        print(f"mock provider : {MOCK_PORT}\nPaperLens API : {APP}", flush=True)
+        print(f"mock provider : {MOCK_PORT}\nPaper2code API : {APP}", flush=True)
 
         async with httpx.AsyncClient(base_url=APP, timeout=300) as client:
             await section_a(check, client)

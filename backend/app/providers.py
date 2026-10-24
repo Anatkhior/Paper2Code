@@ -242,7 +242,7 @@ def _llm_headers() -> dict[str, str] | None:
 
     默认带自定义标识而不是 SDK 默认的 "OpenAI/Python x.x"：有些套 Cloudflare 的
     第三方网关会按 UA 把 SDK 形状的请求直接 403（实测 2026-09-13），请求到不了模型。
-    设 PAPERLENS_HTTP_USER_AGENT="" 可回退 SDK 默认。
+    设 PAPER2CODE_HTTP_USER_AGENT="" 可回退 SDK 默认。
     """
     if not settings.http_user_agent:
         return None
@@ -257,7 +257,7 @@ def _llm_headers() -> dict[str, str] | None:
 # 而旧代码撞到 429 直接让整个 run failed，前面跑出来的东西全丢。
 #
 # 判据按"越靠前越权威"排序（尽量不猜，也尽量不要求用户知道自己的限额）：
-#   1. 配置：PAPERLENS_LLM_MAX_REQUESTS_PER_MINUTE（用户知道限额时最省事）
+#   1. 配置：PAPER2CODE_LLM_MAX_REQUESTS_PER_MINUTE（用户知道限额时最省事）
 #   2. **响应头**（不需要用户知道任何东西）：
 #      成功响应 → x-ratelimit-limit-requests: `10, 10;w=60`（上限, 突发; 窗口秒）、
 #                 x-ratelimit-limit-tokens（token/分钟）
@@ -758,7 +758,7 @@ async def stream_turn(
 ) -> TurnResult:
     """跑一个 LLM turn，把流式增量通过 on_text 回调出去（用于 SSE）。
 
-    timeout 缺省取 PAPERLENS_PER_TURN_TIMEOUT_SECONDS（§8：单次调用不许卡死整个 run）；
+    timeout 缺省取 PAPER2CODE_PER_TURN_TIMEOUT_SECONDS（§8：单次调用不许卡死整个 run）；
     自检场景会显式传更短的值。
 
     限流（429）在这里统一处理：先按客户端节奏等一个空位，撞到限流就退避重试，
@@ -1060,7 +1060,7 @@ def _html_diagnosis(text: str, status: int | None) -> str:
         "② 网关/代理在报错（5xx、被 Cloudflare 挡、额度或鉴权在网关这一层就没过）；"
         "③ 这个地址其实不是 OpenAI 兼容接口。"
         "补充：个别套 Cloudflare 的网关会把 Python SDK 的 User-Agent 当 bot 拦掉——"
-        "试试设置 PAPERLENS_HTTP_USER_AGENT=浏览器UA 或其他标识，再跑一次自检。"
+        "试试设置 PAPER2CODE_HTTP_USER_AGENT=浏览器UA 或其他标识，再跑一次自检。"
         "下面有探测结果，可以看清它到底回了什么。"
     )
 
@@ -1138,7 +1138,7 @@ def _diagnose_exception(exc: Exception) -> str:
         )
         return (
             f"被限流（429）：一次定位/侦察要几十次调用，很容易撞上限。{clause}"
-            "办法：① 设 PAPERLENS_LLM_MAX_REQUESTS_PER_MINUTE=<你的限额>（例如 10）；"
+            "办法：① 设 PAPER2CODE_LLM_MAX_REQUESTS_PER_MINUTE=<你的限额>（例如 10）；"
             "② 换限额更宽的端点。已跑出来的部分不会丢（失败也会交付已核验的结论）。"
             f"原始信息：{_clean(text)[:160]}"
         )

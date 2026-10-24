@@ -1,5 +1,9 @@
 "use client";
 
+import { chatState, chatTurnsFromEvents } from "@/lib/chatState";
+import { migrateStorage, PROVIDER_STORAGE_KEY, TIMELINE_STORAGE_KEY } from "@/lib/providerStorage";
+import { DEFAULT_OUTPUT_LANGUAGE, normalizeOutputLanguage, OUTPUT_LANGUAGE_STORAGE_KEY } from "@/lib/language";
+
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import ChatPanel, { type ChatTurn } from "@/components/ChatPanel";
@@ -30,6 +34,7 @@ import {
 import {
   EVENT_TYPES,
   type Finding,
+  type OutputLanguage,
   type PaperMeta,
   type Plan,
   type ProviderConfig,
@@ -38,7 +43,7 @@ import {
   type VerificationSummary,
 } from "@/lib/types";
 
-const STORAGE_KEY = "paperlens.provider.v1";
+const STORAGE_KEY = PROVIDER_STORAGE_KEY;
 
 const EMPTY_PROVIDER: ProviderConfig = {
   protocol: "openai-compatible",
@@ -52,6 +57,7 @@ type Phase = "idle" | "uploading" | "recon" | "locate" | "done" | "error";
 export default function Home() {
   const [chatTurns, setChatTurns] = useState<ChatTurn[]>([]);
   const [chatBusy, setChatBusy] = useState(false);
+  const [chatAfterId, setChatAfterId] = useState(0);
   const [chatScope, setChatScope] = useState<"current" | "all">("current");
   const chatRef = useRef<HTMLDivElement>(null);
 
@@ -60,6 +66,7 @@ export default function Home() {
   const [plan, setPlan] = useState<Plan | null>(null);
 
   const [provider, setProvider] = useState<ProviderConfig>(EMPTY_PROVIDER);
+  const [outputLanguage, setOutputLanguage] = useState<OutputLanguage>(DEFAULT_OUTPUT_LANGUAGE);
   const [rememberKey, setRememberKey] = useState(false);
   const [smoke, setSmoke] = useState<SmokeResult | null>(null);
   const [smokeBusy, setSmokeBusy] = useState(false);
@@ -86,6 +93,10 @@ export default function Home() {
   }, []);
 
   const sourceRef = useRef<EventSource | null>(null);
+  const chatAfterIdRef = useRef(0);
+  const chatPendingRef = useRef(false);
+  const activeRunRef = useRef(runId);
+  useEffect(() => { activeRunRef.current = runId; }, [runId]);
   // 事件数组的镜像：openStream 需要在"重开流"时知道已经收到哪一条了，但又不该因此重建回调
   // 清单出来后默认全选：省得用户以为"不勾就等于全跑"，也避免只勾一条时的意外
   const autoSelectedRef = useRef(false);
@@ -150,6 +161,7 @@ export default function Home() {
       .catch(() => setBackendUp(false));
 
     try {
+      migrateStorage(window.localStorage);
       const raw = window.localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const saved = JSON.parse(raw) as Record<string, unknown>;
@@ -173,10 +185,30 @@ export default function Home() {
     return () => sourceRef.current?.close();
   }, []);
 
+  useEffect(() => {
+    try {
+      // SSR cannot read browser preferences; restore once after hydration without changing the server markup.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setOutputLanguage(normalizeOutputLanguage(window.localStorage.getItem(OUTPUT_LANGUAGE_STORAGE_KEY)));
+    } catch {
+      setNotice("无法读取浏览器保存的解析语言，当前使用简体中文。");
+    }
+  }, []);
+
   const saveProvider = useCallback(() => {
     const payload = { ...provider, api_key: rememberKey ? provider.api_key : "", remember_key: rememberKey };
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
   }, [provider, rememberKey]);
+
+  const changeOutputLanguage = (value: string) => {
+    const language = normalizeOutputLanguage(value);
+    setOutputLanguage(language);
+    try {
+      window.localStorage.setItem(OUTPUT_LANGUAGE_STORAGE_KEY, language);
+    } catch {
+      setNotice("解析语言已切换，但浏览器无法保存；刷新后会恢复默认语言。");
+    }
+  };
 
   const openStream = useCallback((id: string) => {
     sourceRef.current?.close();
@@ -188,11 +220,17 @@ export default function Home() {
     // 后端发的是具名事件，所以必须逐个类型注册监听（漏一个就静默收不到）
     for (const type of EVENT_TYPES) {
       source.addEventListener(type, (event) => {
+        if (sourceRef.current !== source) return;
         const parsed = JSON.parse((event as MessageEvent).data) as RunEvent;
-        setEvents((previous) =>
-          previous.some((item) => item.id === parsed.id) ? previous : [...previous, parsed],
-        );
+        const next = eventsRef.current.some((item) => item.id === parsed.id) ? eventsRef.current : [...eventsRef.current, parsed];
+        eventsRef.current = next;
+        setEvents(next);
+        const chat = chatState(next);
+        if (chat.reply && chat.userId > chatAfterIdRef.current) setChatTurns(chatTurnsFromEvents(next));
         if (parsed.type === "run_end") {
+          if (chatPendingRef.current && chat.userId <= chatAfterIdRef.current) return;
+          chatPendingRef.current = false;
+          setChatBusy(false);
           setPhase("done");
           source.close();
         }
@@ -240,18 +278,18 @@ export default function Home() {
     setRunId(null);
     try {
       setPhase("uploading");
-      const created = await createRun(file, provider);
+      const created = await createRun(file, provider, outputLanguage);
       setRunId(created.run_id);
       setPaper(created.paper);
       setSetupOpen(false);
       openStream(created.run_id);
       setPhase("recon");
-      await startRecon(created.run_id, provider);
+      await startRecon(created.run_id, provider, outputLanguage);
     } catch (caught) {
       setError(String(caught));
       setPhase("error");
     }
-  }, [file, provider, openStream, clearReader]);
+  }, [file, provider, outputLanguage, openStream, clearReader]);
 
   const handleLocate = useCallback(async () => {
     if (!runId) {
@@ -266,7 +304,7 @@ export default function Home() {
       setError(
         "还没填代码仓库地址 —— 在「代码仓库」中填。" +
           "本地演示可以填 backend/tests/fixtures/sample_repo 的**绝对路径**" +
-          "（需要后端带 PAPERLENS_ALLOW_LOCAL_REPO_PATHS=true 启动）",
+          "（需要后端带 PAPER2CODE_ALLOW_LOCAL_REPO_PATHS=true 启动）",
       );
       return;
     }
@@ -277,14 +315,14 @@ export default function Home() {
       // 后端会重放全部历史（按 id 去重），所以不会丢事件也不会重复。
       openStream(runId);
       setPhase("locate");
-      await startLocate(runId, provider, repoUrl.trim(), Array.from(selected));
+      await startLocate(runId, provider, repoUrl.trim(), Array.from(selected), outputLanguage);
     } catch (caught) {
       setError(String(caught));
       setPhase("error");
     } finally {
       setLocateBusy(false);
     }
-  }, [runId, repoUrl, provider, selected, openStream]);
+  }, [runId, repoUrl, provider, selected, outputLanguage, openStream]);
 
   const planFromEvent = useMemo<Plan | null>(() => {
     const ready = events.find((event) => event.type === "plan_ready");
@@ -313,7 +351,7 @@ export default function Home() {
   // ---- 追问对话 ----
   useEffect(() => {
     try {
-      setTimelineOpen(window.localStorage.getItem("paperlens.timelineOpen") !== "0");
+      setTimelineOpen(window.localStorage.getItem(TIMELINE_STORAGE_KEY) !== "0");
     } catch {
       /* 隐私模式下拿不到 localStorage 也无所谓 */
     }
@@ -323,7 +361,7 @@ export default function Home() {
     setTimelineOpen((open) => {
       const next = !open;
       try {
-        window.localStorage.setItem("paperlens.timelineOpen", next ? "1" : "0");
+        window.localStorage.setItem(TIMELINE_STORAGE_KEY, next ? "1" : "0");
       } catch {
         /* 同上 */
       }
@@ -335,7 +373,8 @@ export default function Home() {
     if (!runId) return;
     try {
       const payload = await fetchChat(runId);
-      setChatTurns((payload.turns ?? []) as ChatTurn[]);
+      if (activeRunRef.current !== runId) return;
+      setChatTurns((current) => (payload.turns?.length ?? 0) >= current.length ? (payload.turns ?? []) as ChatTurn[] : current);
     } catch {
       /* 拉不到就先用事件里的内容，不打断用户 */
     }
@@ -352,7 +391,6 @@ export default function Home() {
   );
   useEffect(() => {
     if (chatReplyCount > 0) {
-      setChatBusy(false);
       void refreshChat();
     }
   }, [chatReplyCount, refreshChat]);
@@ -366,20 +404,8 @@ export default function Home() {
    * "一句疑问 agent 会回复我两次内容"）。后端本身有并发保护（同一 run 同时只允许一个阶段，409），
    * 所以这纯粹是前端重复渲染。
    */
-  const chatStreaming = useMemo(() => {
-    let lastUserIndex = -1;
-    let lastReplyIndex = -1;
-    events.forEach((event, index) => {
-      if (event.type === "chat_user") lastUserIndex = index;
-      if (event.type === "chat_reply") lastReplyIndex = index;
-    });
-    if (lastUserIndex < 0 || lastReplyIndex > lastUserIndex) return "";
-    return events
-      .slice(lastUserIndex + 1)
-      .filter((event) => event.type === "assistant_text")
-      .map((event) => event.data.delta as string)
-      .join("");
-  }, [events]);
+  const chatProgress = useMemo(() => chatState(events), [events]);
+  const chatStreaming = chatProgress.streaming;
 
   const sendChat = useCallback(
     async (message: string) => {
@@ -388,6 +414,9 @@ export default function Home() {
         return;
       }
       setError(null);
+      chatPendingRef.current = true;
+      chatAfterIdRef.current = eventsRef.current.reduce((max, event) => Math.max(max, event.id), 0);
+      setChatAfterId(chatAfterIdRef.current);
       setChatBusy(true);
       setChatTurns((current) => [...current, { role: "user", text: message, ts: Date.now() }]);
       try {
@@ -396,14 +425,16 @@ export default function Home() {
           provider,
           message,
           context_ids: chatContext ? [chatContext.id] : [],
+          output_language: outputLanguage,
         });
       } catch (caught) {
         setError(String(caught));
+        chatPendingRef.current = false;
         setChatBusy(false);
         void refreshChat();
       }
     },
-    [runId, provider, chatContext, openStream, refreshChat],
+    [runId, provider, outputLanguage, chatContext, openStream, refreshChat],
   );
 
   const askAbout = (id: string) => {
@@ -541,11 +572,20 @@ export default function Home() {
     <main className="mx-auto w-full max-w-[1560px] flex-1 px-4 py-4 sm:px-6">
       <header className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">PaperLens <span className="ml-2 text-xs font-normal text-neutral-500">论文与代码，一起读懂</span></h1>
+          <h1 className="text-xl font-semibold tracking-tight">Paper2code <span className="ml-2 text-xs font-normal text-neutral-500">论文与代码，一起读懂</span></h1>
           <p className="mt-1 text-xs text-neutral-500">从核心创新点出发，阅读解释，回到原文与实现。</p>
         </div>
         <span className="text-xs text-neutral-500" title={`后端 ${API_BASE}`}>{backendUp === null ? "连接检查中…" : backendUp ? "● 服务已连接" : "服务未连接，请启动后端"}</span>
       </header>
+
+      <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2">
+        <label htmlFor="output-language" className="text-sm font-medium">解析语言</label>
+        <select id="output-language" value={outputLanguage} onChange={(event) => changeOutputLanguage(event.target.value)} disabled={busy || chatBusy} aria-describedby="output-language-hint" className="min-h-10 rounded-lg border border-neutral-300 bg-white px-3 py-2 text-base focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-600 disabled:cursor-wait disabled:opacity-60 dark:border-neutral-700 dark:bg-neutral-950">
+          <option value="zh-CN">简体中文</option>
+          <option value="en">English</option>
+        </select>
+        <p id="output-language-hint" className="text-sm text-neutral-600 dark:text-neutral-400">用于新生成的创新点、代码讲解和追问；已有结果与引用原文保持不变。</p>
+      </div>
 
       {error && <div role="alert" className="sticky top-2 z-50 mb-4 flex items-start gap-2 rounded-lg border border-red-300 bg-red-50 p-3 text-sm shadow-lg dark:border-red-900 dark:bg-red-950 dark:text-red-100">
         <span className="min-w-0 flex-1 break-words">{error}</span>
@@ -637,7 +677,7 @@ export default function Home() {
           </section>
 
           <div ref={chatRef} hidden={!runId} className="scroll-mt-24">
-            <ChatPanel key={runId} turns={chatTurns} streaming={chatStreaming} busy={chatBusy} context={chatContext} onClearContext={() => setChatScope(chatScope === "current" ? "all" : "current")} onSend={sendChat} disabled={!runId || busy} onOpenCitation={(path, start, end) => openCode(path, start, end, "来自追问对话")} />
+            <ChatPanel key={runId} turns={chatTurns} streaming={chatStreaming} busy={chatBusy} progress={chatProgress.userId > chatAfterId ? chatProgress.status : "正在发送问题"} stoppedReason={chatProgress.reason} context={chatContext} onClearContext={() => setChatScope(chatScope === "current" ? "all" : "current")} onSend={sendChat} disabled={!runId || busy} onOpenCitation={(path, start, end) => openCode(path, start, end, "来自追问对话")} />
           </div>
 
           {runEnd && <details className="rounded-lg border border-neutral-200 dark:border-neutral-800">

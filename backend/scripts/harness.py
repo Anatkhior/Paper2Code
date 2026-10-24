@@ -17,6 +17,8 @@ from typing import Any
 
 import httpx
 
+from app.config_compat import canonical_env
+
 ROOT = Path(__file__).resolve().parents[1]
 # 验收脚本用专属端口：这样你手动起的 mock/后端（8123/8000）不会和验收互抢，
 # 也就不会出现"测试连到了旧代码的服务上"这种鬼故事。
@@ -78,19 +80,30 @@ def assert_port_free(port: int) -> None:
             ) from exc
 
 
-def start_service(module: str, port: int, extra_env: dict[str, str] | None = None) -> subprocess.Popen:
-    assert_port_free(port)
+def service_env(extra_env: dict[str, str] | None = None, *, pin_local_config: bool = True) -> dict[str, str]:
     # 验收必须可复现：把"本机个人配置"里会影响断言的项显式钉住。
     # 实测踩过：开发者为自己的网关在 backend/.env 里写了
-    # PAPERLENS_LLM_MAX_REQUESTS_PER_MINUTE=8，于是限流相关的断言全都读到了 7.5s，
+    # PAPER2CODE_LLM_MAX_REQUESTS_PER_MINUTE=8，于是限流相关的断言全都读到了 7.5s，
     # 「从响应头学会限额」这类断言就分不清是谁教的。
-    env = {
-        **os.environ,
-        "PYTHONPATH": str(ROOT),
-        "PAPERLENS_LLM_MAX_REQUESTS_PER_MINUTE": "0",
-        "PAPERLENS_REPO_NETWORK_MODE": "local",
-        **(extra_env or {}),
-    }
+    # 反过来，跑真实模型时（pin_local_config=False）必须尊重这些配置：
+    # 钉成 0 等于关掉用户为自己网关设的节流，一路撞 429。
+    pinned = (
+        {"PAPER2CODE_LLM_MAX_REQUESTS_PER_MINUTE": "0", "PAPER2CODE_REPO_NETWORK_MODE": "local"}
+        if pin_local_config
+        else {}
+    )
+    return {**canonical_env(os.environ), "PYTHONPATH": str(ROOT), **pinned, **canonical_env(extra_env or {})}
+
+
+def start_service(
+    module: str,
+    port: int,
+    extra_env: dict[str, str] | None = None,
+    *,
+    pin_local_config: bool = True,
+) -> subprocess.Popen:
+    assert_port_free(port)
+    env = service_env(extra_env, pin_local_config=pin_local_config)
     return subprocess.Popen(
         [sys.executable, "-m", "uvicorn", module, "--port", str(port), "--log-level", "warning"],
         cwd=ROOT,

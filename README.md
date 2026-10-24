@@ -1,4 +1,4 @@
-# PaperLens
+# Paper2code
 
 上传一篇论文 PDF + 粘贴一个 GitHub 仓库链接，系统用 Agent 自主探索，定位论文核心创新点对应的代码实现，
 并给出**可核验**的对照解读。
@@ -6,7 +6,7 @@
 > 当前状态：**v0（M0–M4）+ v1 三阶段全部完成并验收** —— 36+162+174+54+48+60+43 = **577 项断言**全部离线可复现：
 > `cd backend && ./scripts/run_all_checks.sh`（含前端构建与生产页面渲染、gold set 评估）。
 >
-> v1 已做：**双栏对照阅读器**（左栏可切「PDF 原版（真实排版，滚动看全文）」与「原文文本（可划选）」，
+> v1 已做：**双栏对照阅读器**（左栏可切「PDF 原版（保留排版，可直接划选）」与「原文文本（备用）」，
 > 右栏代码各自独立滚动、语法着色与引用行号标记）、解释全字段渲染、
 > 解释质量门槛（只有一句话的解释会被打回重写）、**在原文里划选 → 加为定位目标**、
 > **追问对话**（Agent 自己去翻论文和代码；每条消息 8 次工具调用上限；回答里的代码位置逐个机械核对）。
@@ -48,7 +48,7 @@
 | **引用可核验率** | 100% |
 | 诚实报「未找到」 | 100% |
 | 引用总数 / 通过核验 | 2/2 |
-| 平均工具调用 / 总用时 | 7 次 / 1.4s |
+| 工具调用总数 / 总用时（定位阶段） | 7 次 / 1.4s |
 
 > ⚠️ 这一行是**离线模式**：模型行为由 `devtools/mock_provider.py` 脚本化，用来验证评估链路与指标定义本身，**不代表真实模型的能力**。
 > 真实数字请用 `--provider real` 跑你自己的模型。
@@ -65,7 +65,7 @@ gold set 是一张**标准答案表**（`backend/eval/goldset.yaml`）。要让�
 1. **先标注、后运行**：人工读完论文和代码、写下 `must_find_files` 并**冻结 repo 的 commit**，之后才允许跑系统。
    先跑系统再回头补标注 = 数据污染，数字会骗自己。
 2. **commit 必须冻结**：仓库每天都在变，不钉死 commit 的指标没有意义。
-   `m4_check` 会检查冻结的 commit 是否还在，不一致就报错提醒你重新标注。
+   评估会按完整的 40 位小写 SHA 检出，交付后再核对；HEAD 前进不需要重新标注，冻结提交取不到或实际版本不符则不计分。
 3. **gold set 只看一次**：想边跑边改 prompt，请另开"调参集"；gold set 封存到出报告那一刻。
 
 ### 你自己跑一遍
@@ -76,19 +76,33 @@ cd backend
 .venv/bin/python -m eval.run_eval
 
 # 真实：用你自己的模型 + 真实论文与仓库
-PAPERLENS_EVAL_BASE_URL=https://api.deepseek.com/v1 \
-PAPERLENS_EVAL_API_KEY=sk-xxx \
-PAPERLENS_EVAL_MODEL=deepseek-chat \
+PAPER2CODE_EVAL_BASE_URL=https://api.deepseek.com/v1 \
+PAPER2CODE_EVAL_API_KEY=sk-xxx \
+PAPER2CODE_EVAL_MODEL=deepseek-chat \
 .venv/bin/python -m eval.run_eval --provider real --label "DeepSeek-V3"
 ```
 
-真实论文按 `goldset.yaml` 里的模板加（放到 `backend/eval/pdfs/`），然后把 `--provider real` 跑出来的
-表格贴到这一节。**离线那一行永远只是基线，不要拿它当项目效果。**
+真实论文按 `goldset.yaml` 里的模板另建标注集（PDF 放到 `backend/eval/pdfs/`），用
+`--goldset eval/goldset-real.yaml --only lora` 先跑一篇，再去掉 `--only` 跑全量。默认标注集仍是合成夹具。
+
+- 真实模式尊重环境变量与 `backend/.env` 的限流配置，例如 `PAPER2CODE_LLM_MAX_REQUESTS_PER_MINUTE=10`。
+- 离线报告写 `backend/eval/report.json` / `.md`；真实报告写 `backend/eval/reports/<时间>-<标签>-<随机标识>.json` / `.md`，不会被 m4 验收覆盖。真实报告默认不进 git，发布前请检查端点地址和错误信息。
+- 每篇处理完立即保存；失败或版本无效的篇目单列、不进效果汇总，其余继续跑，整轮退出码为 1。已交付的部分结果仍评分，但明确标记 `partial`。表格同时列出已评分/已尝试篇数，未完成的整轮还会注明进度。
+- 报告记录两阶段的结束原因、token 与耗时，失败篇目的已知消耗也纳入总用量；未知用量不会记成零。输入 token 优先取端点值、缺失时估算，输出 token 为文本估算，不是账单。
+- `--phase-timeout` 默认每阶段 1800 秒；超时/断流会尝试取消任务，取消失败会留痕。`--force` 只用于诊断，不会让版本无效的结果计分。
+
+审核真实报告后再把表格贴到这一节。**离线那一行永远只是基线，不要拿它当项目效果。**
+
+旧的 `PAPERLENS_*` 配置仍兼容；同一来源中新 `PAPER2CODE_*` 名字优先，环境变量优先于 `.env`。浏览器设置会迁移，不改变用户是否记住密钥的选择。
+
+追问的 `finish` 只结束资料查阅，随后生成完整正文；失败或取消会标明未完整交付。PDF 阅读器使用本地 PDF.js 文字层，支持原版划选；扫描页不伪装成可选文本，不内置 OCR。
+
+页面顶部可选择**解析语言**（默认简体中文，也可选 English），浏览器会记住选择。设置影响后续侦察、代码逐段讲解与追问，不自动翻译已有结果；论文引文、代码标识符和引用路径保留原文。自动 PDF 高亮只定位同一次引用，不把不同栏或重复出现的片段拼起来；匹配不全时按实际显示的字符比例报告覆盖率。
 
 ## 环境要求
 
 - **Python 3.11+**（必须。`litellm` 用了 3.11 才有的 `typing.NotRequired`，3.10 会直接 ImportError）
-- Node.js 20+（前端，M3 开始用）
+- Node.js 22.13+（前端，M3 开始用）
 
 本机没有 3.11+ 的话，用 [uv](https://docs.astral.sh/uv/) 装一个（推荐，不需要 sudo）：
 
@@ -148,7 +162,7 @@ cd backend
 然后在网页上填：`base_url = http://127.0.0.1:8123/v1`、`api_key = mock-key`、`model = mock-model`
 → 点「运行自检」→ 上传 `backend/tests/fixtures/synthetic_paper.pdf` → 开始侦察 → 勾选创新点
 → 仓库地址填 `backend/tests/fixtures/sample_repo` 的**绝对路径**（需要后端带
-`PAPERLENS_ALLOW_LOCAL_REPO_PATHS=true` 启动）→ 开始定位，看完整的引用核验）。
+`PAPER2CODE_ALLOW_LOCAL_REPO_PATHS=true` 启动）→ 开始定位，看完整的引用核验）。
 
 没有那个开关时，仓库地址必须是 https 的 github.com / gitlab.com 地址。
 
@@ -182,8 +196,8 @@ curl -s http://127.0.0.1:8000/api/provider/smoke-test \
 
 > 兼容性备注：个别套了 Cloudflare 的第三方网关会**按 User-Agent 把 Python SDK 的请求当 bot 直接 403**
 > （2026-09-13 实测某中转站：同 key 同请求体，SDK UA → 403 HTML，自定义 UA → 正常）。
-> PaperLens 的 LLM 请求默认带自定义 UA `PaperLens/0.1` 来避开；若你的网关仍拦，设
-> `PAPERLENS_HTTP_USER_AGENT=任一浏览器UA` 后重启后端再自检。自检失败时会把这个开关写进诊断提示。
+> Paper2code 的 LLM 请求默认带自定义 UA `Paper2code/0.1` 来避开；若你的网关仍拦，设
+> `PAPER2CODE_HTTP_USER_AGENT=任一浏览器UA` 后重启后端再自检。自检失败时会把这个开关写进诊断提示。
 
 ### 接口一览（M0）
 
@@ -223,17 +237,17 @@ curl -s http://127.0.0.1:8000/api/provider/smoke-test \
 | 你的情况 | 怎么办 |
 |---|---|
 | 挂 Clash/Mihomo 等 TUN 代理，提示解析到 `198.18.x.x` | 默认已放行，无需配置 |
-| 公司内网 GitLab / 内网镜像 | 白名单加域名 `PAPERLENS_REPO_ALLOWED_HOSTS=github.com,gitlab.com,git.corp`（非 443 写 `git.corp:8443`）；解析到内网的再用 `PAPERLENS_REPO_ALLOW_CIDRS=10.20.0.0/16` 显式信任 |
-| 用 Gitee / Bitbucket / GitHub Enterprise | 同上，把这些域名加进 `PAPERLENS_REPO_ALLOWED_HOSTS` |
+| 公司内网 GitLab / 内网镜像 | 白名单加域名 `PAPER2CODE_REPO_ALLOWED_HOSTS=github.com,gitlab.com,git.corp`（非 443 写 `git.corp:8443`）；解析到内网的再用 `PAPER2CODE_REPO_ALLOW_CIDRS=10.20.0.0/16` 显式信任 |
+| 用 Gitee / Bitbucket / GitHub Enterprise | 同上，把这些域名加进 `PAPER2CODE_REPO_ALLOWED_HOSTS` |
 | 企业代理要求 git 走代理 / 自签 CA | `local` 模式默认**继承**你的 `~/.gitconfig`（`http.proxy` / `http.sslCAInfo` 都生效） |
-| 公网多租户部署 | 设 `PAPERLENS_REPO_NETWORK_MODE=hosted`（严格判定 + 公网 DoH 交叉核验），并**另外做网络层隔离**：进程内的 DNS 检查不是安全边界 |
-| 仓库里有大体积演示视频/数据集，不想全下载 | 默认就只取**源码视图**（部分克隆 + 稀疏检出）：实测某个含 83MB 演示视频的仓库从 237MB 降到 2.3MB。想调整规则用 `PAPERLENS_REPO_SPARSE_EXCLUDE=!*.bin,!/docs/assets`；想彻底关掉用 `PAPERLENS_REPO_SPARSE=false` |
-| 提示"另有 N 个较大的二进制文件被下载了但工具不会读" | 照提示里给的 `PAPERLENS_REPO_SPARSE_EXCLUDE=!*.xxx` 加上那条规则即可（冷门二进制格式没法预判，所以系统会点名） |
-| 结束原因是「工具调用次数达到上限 40」而**一条结论都没提交** | 以前模型不知道自己在烧最后一次机会（实测有一轮 40 次调用、0 条结论）。现在**边搜边交**：提示词要求证据够了就提交，并在用到 60% / 85% / 墙钟告急时注入「[预算提醒] 已用 24/40…立刻提交已确认的结论」，时间线上同样可见。想直接放宽：`PAPERLENS_MAX_TOOL_CALLS=80`（配 `PAPERLENS_WALL_CLOCK_SECONDS`）——但更该先解决的是「没提交」，不是「次数不够」 |
+| 公网多租户部署 | 设 `PAPER2CODE_REPO_NETWORK_MODE=hosted`（严格判定 + 公网 DoH 交叉核验），并**另外做网络层隔离**：进程内的 DNS 检查不是安全边界 |
+| 仓库里有大体积演示视频/数据集，不想全下载 | 默认就只取**源码视图**（部分克隆 + 稀疏检出）：实测某个含 83MB 演示视频的仓库从 237MB 降到 2.3MB。想调整规则用 `PAPER2CODE_REPO_SPARSE_EXCLUDE=!*.bin,!/docs/assets`；想彻底关掉用 `PAPER2CODE_REPO_SPARSE=false` |
+| 提示"另有 N 个较大的二进制文件被下载了但工具不会读" | 照提示里给的 `PAPER2CODE_REPO_SPARSE_EXCLUDE=!*.xxx` 加上那条规则即可（冷门二进制格式没法预判，所以系统会点名） |
+| 结束原因是「工具调用次数达到上限 40」而**一条结论都没提交** | 以前模型不知道自己在烧最后一次机会（实测有一轮 40 次调用、0 条结论）。现在**边搜边交**：提示词要求证据够了就提交，并在用到 60% / 85% / 墙钟告急时注入「[预算提醒] 已用 24/40…立刻提交已确认的结论」，时间线上同样可见。想直接放宽：`PAPER2CODE_MAX_TOOL_CALLS=80`（配 `PAPER2CODE_WALL_CLOCK_SECONDS`）——但更该先解决的是「没提交」，不是「次数不够」 |
 | 跑着跑着报 `InternalServerError: Connection error.` 或 502/503 | 这是**瞬时故障**（网络抖动 / 代理不稳 / 中途站过载），现在会**自动退避重试**（5s 起跳），时间线显示「连接中断…重试中」。若重试后仍失败：重跑一次通常就好，反复出现就检查本机代理或换端点。**已定位并核验过的结论照常交付**，不会白跑 |
-| 跑着跑着报 `RateLimitError`（网关限流，如"1 分钟最多 10 次"） | 通常**不用配**：端点在响应头里声明了限额（`x-ratelimit-limit-requests: 10, 10;w=60`）就自动按那个节奏走；只说话术的也认（中英文都行）。想看当前生效的节奏：`GET /api/health` 的 `llm_pacing`，或跑一次自检（结论里会写「端点限额已识别（来自响应头）——每 6.0s 一次调用」）。要手动钉住就写 `PAPERLENS_LLM_MAX_REQUESTS_PER_MINUTE=10` 再重启后端。**撞到 429 会自动退避重试**（时间线显示「端点限流，等待 Ns 后重试」）；**额度用尽/欠费不会重试**（直接告诉你重试无用）；**TPM（token/分钟）**会按 token 节流并建议减少上下文。**已定位到的结论不会丢**——失败也会交付并核验已确认的部分 |
+| 跑着跑着报 `RateLimitError`（网关限流，如"1 分钟最多 10 次"） | 通常**不用配**：端点在响应头里声明了限额（`x-ratelimit-limit-requests: 10, 10;w=60`）就自动按那个节奏走；只说话术的也认（中英文都行）。想看当前生效的节奏：`GET /api/health` 的 `llm_pacing`，或跑一次自检（结论里会写「端点限额已识别（来自响应头）——每 6.0s 一次调用」）。要手动钉住就写 `PAPER2CODE_LLM_MAX_REQUESTS_PER_MINUTE=10` 再重启后端。**撞到 429 会自动退避重试**（时间线显示「端点限流，等待 Ns 后重试」）；**额度用尽/欠费不会重试**（直接告诉你重试无用）；**TPM（token/分钟）**会按 token 节流并建议减少上下文。**已定位到的结论不会丢**——失败也会交付并核验已确认的部分 |
 
-环境变量用逗号分隔或 JSON 都行（`PAPERLENS_REPO_ALLOWED_HOSTS=a,b` 是合法的）；
+环境变量用逗号分隔或 JSON 都行（`PAPER2CODE_REPO_ALLOWED_HOSTS=a,b` 是合法的）；
 改完**必须重启后端** —— 配置在导入时读取。
 
 ## 目录结构

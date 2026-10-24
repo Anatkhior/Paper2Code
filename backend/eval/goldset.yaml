@@ -1,15 +1,15 @@
-# PaperLens gold set —— "标准答案表"
+# Paper2code gold set —— "标准答案表"
 #
 # 标注纪律（比指标本身更重要）：
 #   1. 先人工读完论文和代码、写下标注，**并冻结 repo 的 commit_sha**，之后才允许跑系统。
 #   2. 标注时不参考系统输出。想看结果改 prompt 请另开"调参集"，gold set 只在最后跑一次。
 #   3. commit_sha 一旦冻结就不要再改：仓库会持续演进，不钉死 commit 的指标没有意义。
-#      改了仓库内容导致 commit 变化时，m4_check 会报错提醒你重新标注 —— 那是纪律在起作用，不是 bug。
+#      系统按冻结提交检出，HEAD 前进不影响旧标注；冻结提交取不到或产物版本不符时，该篇不计分。
 #
 # 一条 gold 的字段：
 #   id              标识
 #   paper.pdf       相对 backend/ 的 PDF 路径（真实论文请放在 eval/pdfs/ 下）
-#   repo.url        https 仓库地址；本地夹具仓库写相对 backend/ 的路径（需要 PAPERLENS_ALLOW_LOCAL_REPO_PATHS=true）
+#   repo.url        https 仓库地址；本地夹具仓库写相对 backend/ 的路径（需要 PAPER2CODE_ALLOW_LOCAL_REPO_PATHS=true）
 #   repo.commit_sha 标注时冻结的 commit
 #   innovations[].aliases          用于"人工标注 ↔ 系统清单"的对齐（关键词，不是标准答案的措辞要求）
 #   innovations[].must_find_files  实现所在的文件（核心标注）
@@ -22,8 +22,8 @@
     pdf: tests/fixtures/synthetic_paper.pdf
   repo:
     url: tests/fixtures/sample_repo
-    commit_sha: "38a441ad238de34ee6b98ddc99e955c9eede2090"
-  labeler: paperlens-fixture
+    commit_sha: "4f1401e16bfa64bcd66e47ecb0aa61b64206bfb0"
+  labeler: paper2code-fixture
   labeled_at: "2026-09-11"
   notes: >
     合成夹具：论文和仓库都是我造的，所以人工标注的 ground truth 绝对可靠。

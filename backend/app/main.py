@@ -1,4 +1,4 @@
-"""PaperLens FastAPI 后端。
+"""Paper2code FastAPI 后端。
 
 端点：
     GET  /api/health                       健康检查
@@ -29,7 +29,7 @@ from sse_starlette.sse import EventSourceResponse
 from . import store
 from .agent.loop import run_agent
 from .agent.tools.base import Budget, Tool
-from .agent.tools.builtin import FINISH, M0_TOOLS, build_m0_system_prompt, build_m0_user_prompt
+from .agent.tools.builtin import CHAT_FINISH, FINISH, M0_TOOLS, build_m0_system_prompt, build_m0_user_prompt
 from .agent.tools.findings import RECORD_FINDING, RECORD_PLAN
 from .agent.tools.paper_tools import PAPER_TOOLS
 from .agent.tools.repo_tools import REPO_TOOLS
@@ -53,12 +53,20 @@ from .prompts import (
     build_locate_user_prompt,
     build_recon_user_prompt,
 )
+from .language import DEFAULT_OUTPUT_LANGUAGE, OutputLanguage, localized_prompt, normalize_language
 from .providers import ProviderConfig, SmokeResult, smoke_test
-from .repo_source import RepoError, RepoSource, clone_repo, text_lines, validate_repo_url
+from .repo_source import (
+    COMMIT_SHA_PATTERN,
+    RepoError,
+    RepoSource,
+    clone_repo,
+    text_lines,
+    validate_repo_url,
+)
 from .verify import summarize as verify_summarize
 from .verify import verify_artifact
 
-app = FastAPI(title="PaperLens API", version="0.1.0-m1")
+app = FastAPI(title="Paper2code API", version="0.1.0-m1")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -139,6 +147,7 @@ async def provider_smoke_test(cfg: ProviderConfig) -> SmokeResult:
 async def create_run(
     file: UploadFile = File(...),
     provider: str = Form(...),
+    output_language: OutputLanguage = Form(DEFAULT_OUTPUT_LANGUAGE),
 ) -> dict[str, Any]:
     try:
         cfg = ProviderConfig.model_validate_json(provider)
@@ -181,7 +190,7 @@ async def create_run(
         "bytes": len(data),
         "filename": file.filename,
     }
-    store.write_meta(run_id, paper=paper_meta, provider_label=cfg.safe_label())
+    store.write_meta(run_id, paper=paper_meta, provider_label=cfg.safe_label(), output_language=output_language)
     bus = RunBus(run_id, store.events_path(run_id))
     RUNS[run_id] = _Run(run_id, bus)
 
@@ -200,6 +209,7 @@ async def create_run(
 class ReconRequest(BaseModel):
     provider: ProviderConfig
     extra_instructions: str | None = None
+    output_language: OutputLanguage | None = None
 
 
 @app.post("/api/runs/{run_id}/recon")
@@ -218,7 +228,8 @@ async def start_recon(run_id: str, req: ReconRequest) -> dict[str, Any]:
     # —— 界面上表现为一直卡在"侦察中…"。
     bus = run.bus
     run.phase = "recon"
-    store.write_meta(run_id, phase="recon", model=req.provider.model)
+    language = req.output_language or normalize_language(meta.get("output_language"))
+    store.write_meta(run_id, phase="recon", model=req.provider.model, output_language=language)
 
     directory = store.run_dir(run_id)
     tools: list[Tool] = [*PAPER_TOOLS, RECORD_PLAN]
@@ -229,7 +240,7 @@ async def start_recon(run_id: str, req: ReconRequest) -> dict[str, Any]:
             run.summary = await run_agent(
                 cfg=req.provider,
                 tools=tools,
-                system_prompt=RECON_SYSTEM_PROMPT,
+                system_prompt=localized_prompt(RECON_SYSTEM_PROMPT, language),
                 user_prompt=build_recon_user_prompt(
                     title_guess=paper_meta.get("title_guess", ""),
                     page_count=paper_meta.get("page_count", 0),
@@ -238,7 +249,7 @@ async def start_recon(run_id: str, req: ReconRequest) -> dict[str, Any]:
                 budget=_budget(),
                 run_dir_path=directory,
                 paper=doc,
-                meta={"phase": "recon", "provider_label": req.provider.safe_label()},
+                meta={"phase": "recon", "provider_label": req.provider.safe_label(), "output_language": language},
             )
         finally:
             doc.close()
@@ -322,6 +333,10 @@ class LocateRequest(BaseModel):
     provider: ProviderConfig
     repo_url: str
     selected_ids: list[str] | None = None
+    output_language: OutputLanguage | None = None
+    # 可选：钉在某个提交上（完整 40 位 sha）。不给就取远端 HEAD。
+    # 评估要用它：gold set 是对着冻结的 commit 标注的，上游更新后不能拿新代码对旧标注打分。
+    commit: str | None = Field(default=None, pattern=f"^{COMMIT_SHA_PATTERN}$")
 
 
 def _load_plan(run_id: str) -> dict[str, Any] | None:
@@ -351,6 +366,7 @@ def _build_artifact(
             "repo": repo_info,
             "provider": {"protocol": cfg.protocol, "model": cfg.model},
             "prompt_version": settings.prompt_version,
+            "output_language": normalize_language(meta.get("output_language")),
             "budget_used": summary.get("usage", {}),
         },
         "innovations": ordered,
@@ -405,10 +421,13 @@ async def start_locate(run_id: str, req: LocateRequest) -> dict[str, Any]:
 
     bus = run.bus  # 同上：阶段切换不换总线
     run.phase = "locate"
+    language = req.output_language or normalize_language(store.read_meta(run_id).get("output_language"))
     store.write_meta(
         run_id,
         phase="locate",
+        output_language=language,
         repo_url=req.repo_url,
+        repo_commit=req.commit,
         selected=[t["id"] for t in targets],
         repo_notes=repo_notes,
     )
@@ -429,7 +448,7 @@ async def start_locate(run_id: str, req: LocateRequest) -> dict[str, Any]:
             )
 
     async def _locate_body() -> None:
-        await bus.emit("repo_cloning", url=req.repo_url, commit_sha=None)
+        await bus.emit("repo_cloning", url=req.repo_url, commit_sha=req.commit)
 
         # 克隆是同步阻塞调用，必须丢进线程池：否则慢克隆（最长 300s）会把整个
         # 事件循环冻住——其他请求、SSE 心跳全部停摆。进度经线程安全队列转发，
@@ -456,6 +475,7 @@ async def start_locate(run_id: str, req: LocateRequest) -> dict[str, Any]:
                 directory / "repo",
                 overwrite=True,
                 on_progress=_on_progress,
+                commit=req.commit,
             )
         except RepoError as exc:
             await bus.emit("error", kind="RepoError", message=str(exc))
@@ -502,7 +522,7 @@ async def start_locate(run_id: str, req: LocateRequest) -> dict[str, Any]:
         run.summary = await run_agent(
             cfg=req.provider,
             tools=tools,
-            system_prompt=LOCATE_SYSTEM_PROMPT,
+            system_prompt=localized_prompt(LOCATE_SYSTEM_PROMPT, language),
             user_prompt=build_locate_user_prompt(targets, repo_info),
             bus=bus,
             budget=budget,
@@ -513,6 +533,7 @@ async def start_locate(run_id: str, req: LocateRequest) -> dict[str, Any]:
             finalize=_finalize,
             meta={
                 "phase": "locate",
+                "output_language": language,
                 "provider_label": req.provider.safe_label(),
                 "commit_sha": info.commit_sha,
                 "targets": [t["id"] for t in targets],
@@ -538,6 +559,7 @@ class ChatRequest(BaseModel):
     provider: ProviderConfig
     message: str = Field(min_length=1, max_length=2000)
     context_ids: list[str] = Field(default_factory=list)
+    output_language: OutputLanguage | None = None
 
 
 def _artifact(run_id: str) -> dict[str, Any] | None:
@@ -572,7 +594,7 @@ def _chat_tools(run_id: str) -> tuple[list[Tool], PaperDocument | None, RepoSour
         repo = RepoSource(repo_dir, repo_info["commit_sha"])
         tools.extend(REPO_TOOLS)
 
-    tools.append(FINISH)
+    tools.append(CHAT_FINISH)
     return tools, paper, repo
 
 
@@ -587,6 +609,7 @@ async def post_chat(run_id: str, req: ChatRequest) -> dict[str, Any]:
     run = _registry(run_id)
     await _require_idle(run)
 
+    language = req.output_language or normalize_language(store.read_meta(run_id).get("output_language"))
     question = req.message.strip()
     if not question:
         raise HTTPException(status_code=422, detail="消息不能为空")
@@ -600,7 +623,8 @@ async def post_chat(run_id: str, req: ChatRequest) -> dict[str, Any]:
         build_chat_prompt(history, question, req.context_ids),
     )
 
-    append_chat_turn(run_id, "user", question, context_ids=req.context_ids)
+    store.write_meta(run_id, output_language=language)
+    append_chat_turn(run_id, "user", question, context_ids=req.context_ids, output_language=language)
     await run.bus.emit("chat_user", message=question, context_ids=req.context_ids)
 
     budget = Budget(
@@ -615,7 +639,8 @@ async def post_chat(run_id: str, req: ChatRequest) -> dict[str, Any]:
     async def _finalize(result: dict[str, Any]) -> dict[str, Any]:
         reply = (result.get("final_text") or "").strip()
         if not reply:
-            reply = f"（这次没能在预算内给出回答。停止原因：{result.get('stopped_reason')}）"
+            reply = f"（本轮没有交付完整回答。停止原因：{result.get('stopped_reason')}）"
+        completion = {"status": result.get("status", "failed"), "partial": bool(result.get("partial")), "output_language": language}
         citations = verify_citations(repo, reply)
         tools_used = result.get("tools_used") or []
         append_chat_turn(
@@ -625,6 +650,7 @@ async def post_chat(run_id: str, req: ChatRequest) -> dict[str, Any]:
             tools_used=tools_used,
             citations=citations,
             stopped_reason=result.get("stopped_reason"),
+            **completion,
         )
         await bus.emit(
             "chat_reply",
@@ -634,6 +660,7 @@ async def post_chat(run_id: str, req: ChatRequest) -> dict[str, Any]:
             unverified=sum(1 for item in citations if not item["verified"]),
             usage=result.get("usage"),
             stopped_reason=result.get("stopped_reason"),
+            **completion,
         )
         return {"chat_reply": reply}
 
@@ -642,16 +669,17 @@ async def post_chat(run_id: str, req: ChatRequest) -> dict[str, Any]:
             await run_agent(
                 cfg=req.provider,
                 tools=tools,
-                system_prompt=CHAT_SYSTEM_PROMPT,
+                system_prompt=localized_prompt(CHAT_SYSTEM_PROMPT, language),
                 user_prompt=user_prompt,
                 bus=bus,
                 budget=budget,
                 run_dir_path=directory,
                 paper=paper,
                 repo=repo,
-                meta={"phase": "chat", "provider_label": req.provider.safe_label()},
+                meta={"phase": "chat", "provider_label": req.provider.safe_label(), "output_language": language},
                 finalize=_finalize,
                 max_turns=settings.chat_max_tool_calls + 4,
+                require_final_answer=True,
             )
         finally:
             if paper is not None:

@@ -92,7 +92,7 @@ class RepoError(Exception):
 #   1. 部署模式决定严格度：local（默认，单人自用）只拦"绝不可能是代码托管站"的地址；
 #      hosted（公网多租户）才把非公网解析结果当拒绝项；
 #   2. 需要判定时，用公网 DoH 交叉核验"域名在公网的真实归属"（与厂商/段/IP 族无关）；
-#   3. 部署者可以用 PAPERLENS_REPO_ALLOW_CIDRS 显式信任某个网段（内网镜像、fake-ip 段）。
+#   3. 部署者可以用 PAPER2CODE_REPO_ALLOW_CIDRS 显式信任某个网段（内网镜像、fake-ip 段）。
 KIND_CN = {
     "loopback": "回环",
     "link_local": "链路本地",
@@ -188,7 +188,7 @@ def _allowed_host_ports() -> dict[str, set[int]]:
 
 
 def _trusted_networks() -> list[Any]:
-    """PAPERLENS_REPO_ALLOW_CIDRS 解析。写错了要给看得懂的报错，而不是崩。"""
+    """PAPER2CODE_REPO_ALLOW_CIDRS 解析。写错了要给看得懂的报错，而不是崩。"""
     networks: list[Any] = []
     for raw in settings.repo_allow_cidrs:
         text = str(raw).strip()
@@ -198,7 +198,7 @@ def _trusted_networks() -> list[Any]:
             networks.append(ipaddress.ip_network(text, strict=False))
         except ValueError as exc:
             raise RepoError(
-                f"PAPERLENS_REPO_ALLOW_CIDRS 里的网段看不懂：{text}（例：198.18.0.0/15 或 10.20.0.0/16）"
+                f"PAPER2CODE_REPO_ALLOW_CIDRS 里的网段看不懂：{text}（例：198.18.0.0/15 或 10.20.0.0/16）"
             ) from exc
     return networks
 
@@ -291,7 +291,7 @@ def _judge_resolved_addresses(host: str, findings: list[AddressFinding]) -> list
     resolved = "、".join(f.address for f in findings)
     if settings.repo_allow_private_ips:
         return [
-            f"已开启 PAPERLENS_REPO_ALLOW_PRIVATE_IPS（全有全无的逃生开关）：跳过地址判定，"
+            f"已开启 PAPER2CODE_REPO_ALLOW_PRIVATE_IPS（全有全无的逃生开关）：跳过地址判定，"
             f"{host} 解析到 {resolved}"
         ]
 
@@ -300,7 +300,7 @@ def _judge_resolved_addresses(host: str, findings: list[AddressFinding]) -> list
     untrusted = [f for f in findings if not _address_trusted(f.address, networks)]
     if not untrusted:
         notes.append(
-            f"{host} 解析到的地址（{resolved}）在 PAPERLENS_REPO_ALLOW_CIDRS 显式信任范围内，放行"
+            f"{host} 解析到的地址（{resolved}）在 PAPER2CODE_REPO_ALLOW_CIDRS 显式信任范围内，放行"
         )
         return notes
 
@@ -313,8 +313,8 @@ def _judge_resolved_addresses(host: str, findings: list[AddressFinding]) -> list
         return RepoError(
             f"{host} 解析到了内网地址：{detail}。回环/链路本地/组播这类地址不可能是代码托管站，"
             "而且是 SSRF 的经典靶子（云元数据 169.254.169.254 就在链路本地段里），默认拒绝。"
-            "若你的环境确实如此（本机镜像、企业代理解析），用 PAPERLENS_REPO_ALLOW_CIDRS=<该网段> "
-            "显式放行，或设 PAPERLENS_REPO_ALLOW_PRIVATE_IPS=true 放行所有非公网地址。"
+            "若你的环境确实如此（本机镜像、企业代理解析），用 PAPER2CODE_REPO_ALLOW_CIDRS=<该网段> "
+            "显式放行，或设 PAPER2CODE_REPO_ALLOW_PRIVATE_IPS=true 放行所有非公网地址。"
         )
 
     if hard:
@@ -348,26 +348,26 @@ def _judge_resolved_addresses(host: str, findings: list[AddressFinding]) -> list
             raise RepoError(
                 f"{host} 同时解析出公网地址（{'、'.join(f.address for f in public)}）和非公网地址"
                 f"（{detail}）——这是 DNS rebinding 的典型特征，hosted 模式拒绝。"
-                "若这是你自己的分流 DNS，用 PAPERLENS_REPO_ALLOW_CIDRS=<该网段> 显式信任。"
+                "若这是你自己的分流 DNS，用 PAPER2CODE_REPO_ALLOW_CIDRS=<该网段> 显式信任。"
             )
         if verdict is False:
             raise RepoError(
                 f"{host} 解析到了非公网地址：{detail}，且公网 DNS 也没有该域名的公网 A 记录"
-                "——判定为真实内网目标，PAPERLENS_REPO_NETWORK_MODE=hosted 下拒绝。"
-                "若这是你自己的内网镜像（自建 GitLab 等），用 PAPERLENS_REPO_ALLOW_CIDRS=<该网段> "
-                "显式信任，或设 PAPERLENS_REPO_NETWORK_MODE=local（仅单机自用）。"
+                "——判定为真实内网目标，PAPER2CODE_REPO_NETWORK_MODE=hosted 下拒绝。"
+                "若这是你自己的内网镜像（自建 GitLab 等），用 PAPER2CODE_REPO_ALLOW_CIDRS=<该网段> "
+                "显式信任，或设 PAPER2CODE_REPO_NETWORK_MODE=local（仅单机自用）。"
             )
         raise RepoError(
             f"{host} 解析到了非公网地址：{detail}，而公网 DoH 核验不可达"
             f"（端点：{'、'.join(settings.repo_doh_endpoints)}），hosted 模式按拒绝处理。"
-            "可以：① 用 PAPERLENS_REPO_ALLOW_CIDRS=<该网段> 显式信任；"
-            "② 设 PAPERLENS_REPO_DNS_CROSSCHECK=off 并在 PAPERLENS_REPO_ALLOW_CIDRS 里列全；"
-            "③ 单机自用就设 PAPERLENS_REPO_NETWORK_MODE=local。"
+            "可以：① 用 PAPER2CODE_REPO_ALLOW_CIDRS=<该网段> 显式信任；"
+            "② 设 PAPER2CODE_REPO_DNS_CROSSCHECK=off 并在 PAPER2CODE_REPO_ALLOW_CIDRS 里列全；"
+            "③ 单机自用就设 PAPER2CODE_REPO_NETWORK_MODE=local。"
         )
     raise RepoError(
-        f"{host} 解析到了非公网地址：{detail}，PAPERLENS_REPO_NETWORK_MODE=hosted 且未启用 DoH "
-        "交叉核验（PAPERLENS_REPO_DNS_CROSSCHECK=off），按拒绝处理。"
-        "用 PAPERLENS_REPO_ALLOW_CIDRS=<该网段> 显式信任，或单机自用改回 local 模式。"
+        f"{host} 解析到了非公网地址：{detail}，PAPER2CODE_REPO_NETWORK_MODE=hosted 且未启用 DoH "
+        "交叉核验（PAPER2CODE_REPO_DNS_CROSSCHECK=off），按拒绝处理。"
+        "用 PAPER2CODE_REPO_ALLOW_CIDRS=<该网段> 显式信任，或单机自用改回 local 模式。"
     )
 
 
@@ -386,7 +386,7 @@ def validate_repo_url(url: str) -> list[str]:
     if not url.startswith(("http://", "https://")):
         if not settings.allow_local_repo_paths:
             raise RepoError(
-                "本地路径默认不可用（仅测试需要时打开 PAPERLENS_ALLOW_LOCAL_REPO_PATHS）；"
+                "本地路径默认不可用（仅测试需要时打开 PAPER2CODE_ALLOW_LOCAL_REPO_PATHS）；"
                 "请填 https 的托管站地址"
             )
         candidate = Path(url.replace("file://", "", 1))
@@ -394,7 +394,7 @@ def validate_repo_url(url: str) -> list[str]:
             # 本地路径 = 测试/演示模式，这个提示会走到前端时间线上：
             # 既让"守卫为什么放行"可见，也提醒不要在生产部署里打开这个开关。
             notes.append(
-                "本地仓库路径（PAPERLENS_ALLOW_LOCAL_REPO_PATHS=true）：仅测试/演示用，公网部署绝不能开。"
+                "本地仓库路径（PAPER2CODE_ALLOW_LOCAL_REPO_PATHS=true）：仅测试/演示用，公网部署绝不能开。"
             )
             return notes
         raise RepoError(f"本地仓库路径不存在：{url}")
@@ -418,7 +418,7 @@ def validate_repo_url(url: str) -> list[str]:
         raise RepoError(
             f"只允许这些代码托管站：{', '.join(str(item) for item in settings.repo_allowed_hosts)}"
             f"（当前是 {host}）。要支持别的托管站（Gitee、GitHub Enterprise、自建 GitLab…）"
-            f"就设 PAPERLENS_REPO_ALLOWED_HOSTS={','.join(str(item) for item in settings.repo_allowed_hosts)},{host}"
+            f"就设 PAPER2CODE_REPO_ALLOWED_HOSTS={','.join(str(item) for item in settings.repo_allowed_hosts)},{host}"
             "（非 443 端口写成 host:port），然后重启后端"
         )
     try:
@@ -429,7 +429,7 @@ def validate_repo_url(url: str) -> list[str]:
     if port not in allowed[host]:
         raise RepoError(
             f"只允许 {sorted(allowed[host])} 端口（当前是 {port}）。"
-            f"要放行这个端口就显式声明：PAPERLENS_REPO_ALLOWED_HOSTS=...,{host}:{port}"
+            f"要放行这个端口就显式声明：PAPER2CODE_REPO_ALLOWED_HOSTS=...,{host}:{port}"
             f"（要同时允许默认的 443，就再加一条不带端口的 {host}）"
         )
 
@@ -540,7 +540,7 @@ def run_git(args: list[str], cwd: Path, *, timeout: int = 60) -> subprocess.Comp
         raise RepoError(
             f"git 命令超时（{timeout}s）：{' '.join(str(a) for a in args[:3])}…。"
             "网络慢或代理卡住时重试即可；克隆/稀疏检出相关超时可用 "
-            "PAPERLENS_REPO_CLONE_TIMEOUT_SECONDS 调大。"
+            "PAPER2CODE_REPO_CLONE_TIMEOUT_SECONDS 调大。"
         ) from exc
 
 
@@ -684,7 +684,7 @@ def _clone_timeout_message() -> str:
     return (
         f"克隆超时（超过 {settings.repo_clone_timeout_seconds}s），已清理。"
         "网络慢（如经代理访问 GitHub）可以调大：启动前设 "
-        f"PAPERLENS_REPO_CLONE_TIMEOUT_SECONDS=600。另外注意 {settings.repo_max_mb}MB 体积上限仍然生效。"
+        f"PAPER2CODE_REPO_CLONE_TIMEOUT_SECONDS=600。另外注意 {settings.repo_max_mb}MB 体积上限仍然生效。"
     )
 
 
@@ -770,7 +770,26 @@ def _run_git_streaming(
     return proc.returncode, b"".join(collected).decode("utf-8", errors="replace")
 
 
-def clone_repo(url: str, dest: Path, *, overwrite: bool = False, on_progress=None) -> RepoInfo:
+COMMIT_SHA_PATTERN = r"[0-9a-f]{40}"
+
+
+def clone_repo(
+    url: str,
+    dest: Path,
+    *,
+    overwrite: bool = False,
+    on_progress=None,
+    commit: str | None = None,
+) -> RepoInfo:
+    """克隆仓库。`commit` 给了就钉在那个提交上，否则取远端 HEAD。
+
+    为什么要能钉提交：评估的 gold set 是对着某个冻结的 commit 标注的，
+    上游一更新，"克隆 HEAD"就会拿新代码对旧标注打分，而且没有任何提示。
+    """
+    if commit is not None:
+        commit = commit.strip().lower()
+        if not re.fullmatch(COMMIT_SHA_PATTERN, commit):
+            raise RepoError(f"指定的提交号必须是完整的 40 位十六进制 sha：{commit[:48]}")
     resolution_notes = validate_repo_url(url)
     started = time.monotonic()
     # 一定要绝对路径：subprocess 的 cwd 与 git 自己解析相对路径的基准不同，
@@ -785,15 +804,16 @@ def clone_repo(url: str, dest: Path, *, overwrite: bool = False, on_progress=Non
         _rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
-    # 预检：一次 ls-remote 拿到 HEAD 的 sha（失败立刻给人话，也决定缓存键）
-    head_sha = resolve_head(url)
+    # 预检：一次 ls-remote 拿到 HEAD 的 sha（失败立刻给人话，也决定缓存键）。
+    # 钉了提交就不用问 HEAD：目标 sha 已知，能不能取到由下面的 fetch 如实报错。
+    target_sha = commit or resolve_head(url)
     sparse_wanted = settings.repo_sparse and _git_supports_sparse_checkout()
     if settings.repo_sparse and not sparse_wanted:
         resolution_notes.append("git 版本低于 2.25，不支持稀疏检出，已退回全量克隆")
 
     from_cache = False
-    entry = _cache_entry(url, head_sha)
-    if _cache_entry_ready(entry, head_sha):
+    entry = _cache_entry(url, target_sha)
+    if _cache_entry_ready(entry, target_sha):
         # 缓存命中：硬链接复制（对象库共享 inode，秒级）。
         # 依据（2026-09-12 实测）：从浅克隆做本地副本是允许的，产物同样是钉在同一个
         # commit 的单提交仓库；缓存条目日后被清理也不影响已克隆的 run（硬链接语义，
@@ -816,7 +836,9 @@ def clone_repo(url: str, dest: Path, *, overwrite: bool = False, on_progress=Non
         # 注意不能同时用 --quiet——quiet 会把进度一起吞掉。
         try:
             returncode, stderr_text = _run_git_streaming(
-                _clone_command(url, dest, sparse=sparse_wanted, partial=sparse_wanted),
+                _clone_command(
+                    url, dest, sparse=sparse_wanted, partial=sparse_wanted, no_checkout=commit is not None
+                ),
                 cwd=dest.parent,
                 timeout=settings.repo_clone_timeout_seconds,
                 on_progress=on_progress,
@@ -826,6 +848,8 @@ def clone_repo(url: str, dest: Path, *, overwrite: bool = False, on_progress=Non
         if returncode != 0:
             message = stderr_text.strip().splitlines()
             raise RepoError(f"克隆失败：{message[-1] if message else '未知错误'}")
+        if commit is not None:
+            _checkout_commit(dest, commit, on_progress=on_progress)
 
     # origin 必须指着真正的上游：部分克隆的缺失 blob 是"按需去 origin 取"的，而缓存命中
     # 路径的 origin 会是缓存目录（本地路径）——留成那样等于取不到对象。
@@ -846,7 +870,7 @@ def clone_repo(url: str, dest: Path, *, overwrite: bool = False, on_progress=Non
             on_progress=on_progress,
             timeout_hint=(
                 "稀疏检出超时（按需取源码文件太慢），已中止。可以调大 "
-                "PAPERLENS_REPO_CLONE_TIMEOUT_SECONDS，或设 PAPERLENS_REPO_SPARSE=false 退回全量克隆。"
+                "PAPER2CODE_REPO_CLONE_TIMEOUT_SECONDS，或设 PAPER2CODE_REPO_SPARSE=false 退回全量克隆。"
             ),
         )
         if code != 0:
@@ -857,7 +881,7 @@ def clone_repo(url: str, dest: Path, *, overwrite: bool = False, on_progress=Non
             _rmtree(dest)
             raise RepoError(
                 f"稀疏检出失败（只取源码视图这一步）：{tail[-1] if tail else '未知错误'}。"
-                "网络抖动时重试即可；也可设 PAPERLENS_REPO_SPARSE=false 退回全量克隆。"
+                "网络抖动时重试即可；也可设 PAPER2CODE_REPO_SPARSE=false 退回全量克隆。"
             )
 
     # ---- 先量体积再决定留不留：被拒的仓库不该占磁盘、也不该进缓存 ----
@@ -881,21 +905,22 @@ def clone_repo(url: str, dest: Path, *, overwrite: bool = False, on_progress=Non
                 if skipped_files and git_bytes > work_bytes * 2
                 else ""
             )
-            + "可以调大 PAPERLENS_REPO_MAX_MB，或检查 PAPERLENS_REPO_SPARSE 是否被关掉了。"
+            + "可以调大 PAPER2CODE_REPO_MAX_MB，或检查 PAPER2CODE_REPO_SPARSE 是否被关掉了。"
         )
-
-    # 过关了才回填缓存（原顺序：先回填再量体积 → 被拒的仓库照样占着缓存 238MB，实测过）
-    if not from_cache:
-        _populate_cache(url, head_sha, dest)
 
     revision = run_git(["rev-parse", "HEAD"], cwd=dest, timeout=15)
     if revision.returncode != 0:
         raise RepoError("克隆后拿不到 commit 号")
     commit_sha = revision.stdout.strip()
-    if commit_sha != head_sha:
+    if commit_sha != target_sha:
+        expected = "指定的提交" if commit else "预检结果"
         raise RepoError(
-            f"克隆到的 HEAD（{commit_sha[:12]}…）与预检结果（{head_sha[:12]}…）不一致，已中止"
+            f"克隆到的 HEAD（{commit_sha[:12]}…）与{expected}（{target_sha[:12]}…）不一致，已中止"
         )
+
+    # 体积与提交号都核对通过才回填缓存，避免失败克隆污染后续评估。
+    if not from_cache:
+        _populate_cache(url, target_sha, dest)
 
     if sparse_wanted:
         # 只报**能确证的事实**：工作区有多少文件/多大、对象库多大、git 说跳过了哪些。
@@ -916,7 +941,7 @@ def clone_repo(url: str, dest: Path, *, overwrite: bool = False, on_progress=Non
             suffixes = sorted({Path(name).suffix or name for _, name in heavy})
             note += (
                 f"；另有 {len(heavy)} 个较大的二进制文件被下载了但工具不会读：{names}——"
-                f"要连它们也不下载，设 PAPERLENS_REPO_SPARSE_EXCLUDE={','.join('!' + s for s in suffixes)}"
+                f"要连它们也不下载，设 PAPER2CODE_REPO_SPARSE_EXCLUDE={','.join('!' + s for s in suffixes)}"
             )
         resolution_notes.append(note)
 
@@ -963,7 +988,7 @@ def sparse_exclude_patterns(dest: Path | None = None) -> list[str]:
     1. SKIP_DIRS（依赖/构建/缓存目录）与 BINARY_SUFFIXES（二进制/权重/媒体后缀）——
        与读取层同一套标准，"不下载什么"和"不读什么"不会分叉；
     2. 仓库自己在 `.gitattributes` 里声明的 binary / filter=lfs 模式（作者最清楚哪些是资产）；
-    3. 用户用 PAPERLENS_REPO_SPARSE_EXCLUDE 追加的规则。
+    3. 用户用 PAPER2CODE_REPO_SPARSE_EXCLUDE 追加的规则。
     """
     patterns = [SPARSE_INCLUDE_ALL]
     patterns += [f"!{name}" for name in sorted(SKIP_DIRS) if name != ".git"]
@@ -1016,7 +1041,7 @@ def unreadable_heavy_files(root: Path, *, top: int = 3, min_bytes: int = 1024 * 
 
     用途是给用户一条可执行的出路：后缀表之外的冷门二进制格式（实测
     `docs/assets/**/*.i16` 6 个文件 26MB）我们没法预判，但可以在提示里点名，
-    并给出该加哪条 PAPERLENS_REPO_SPARSE_EXCLUDE。
+    并给出该加哪条 PAPER2CODE_REPO_SPARSE_EXCLUDE。
     """
     found: list[tuple[int, str]] = []
     for path in root.rglob("*"):
@@ -1035,7 +1060,9 @@ def unreadable_heavy_files(root: Path, *, top: int = 3, min_bytes: int = 1024 * 
     return found[:top]
 
 
-def _clone_command(url: str, dest: Path, *, sparse: bool, partial: bool) -> list[str]:
+def _clone_command(
+    url: str, dest: Path, *, sparse: bool, partial: bool, no_checkout: bool = False
+) -> list[str]:
     """构造 clone 参数（纯函数，可离线验收）。"""
     args = [
         "clone",
@@ -1053,8 +1080,37 @@ def _clone_command(url: str, dest: Path, *, sparse: bool, partial: bool) -> list
     if partial:
         # 只取提交与目录树；blob 按需取。服务器不支持时 git 会警告并忽略（我们事后核对）。
         args.append("--filter=blob:none")
+    if no_checkout:
+        # 要钉提交时先不检出 HEAD：部分克隆下检出会去取 blob，取了也白取
+        args.append("--no-checkout")
     args += [url, str(dest)]
     return args
+
+
+def _checkout_commit(dest: Path, commit: str, *, on_progress=None) -> None:
+    """在刚克隆好的浅仓库里取回指定提交并检出（分离 HEAD）。
+
+    2026-09-29 实测：GitHub 允许按完整 sha 浅取任意可达提交（microsoft/LoRA 落后 HEAD
+    5 个提交，7 秒、.git 436K）；取不到时报 `not our ref`。本地路径与 file:// 同样可用。
+    """
+    for args, what in (
+        (["fetch", "--progress", "--depth", "1", "--no-tags", "origin", commit], "取回"),
+        (["checkout", "--progress", "--detach", commit], "检出"),
+    ):
+        try:
+            code, stderr_text = _run_git_streaming(
+                args, cwd=dest, timeout=settings.repo_clone_timeout_seconds, on_progress=on_progress
+            )
+        except RepoError:
+            _rmtree(dest)
+            raise
+        if code != 0:
+            tail = stderr_text.strip().splitlines()
+            _rmtree(dest)
+            raise RepoError(
+                f"{what}指定的提交 {commit[:12]}… 失败：{tail[-1] if tail else '未知错误'}。"
+                "请确认提交号完整、且仍在远端（被 force-push 丢弃的提交取不回来）。"
+            )
 
 
 def _partial_clone_active(dest: Path) -> bool:

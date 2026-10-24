@@ -774,7 +774,7 @@ async def main() -> int:
     try:
         await wait_http(f"http://127.0.0.1:{MOCK_PORT}/health")
         await wait_http(f"{APP}/api/health")
-        print(f"mock provider : {MOCK_PORT}\nPaperLens API : {APP}", flush=True)
+        print(f"mock provider : {MOCK_PORT}\nPaper2code API : {APP}", flush=True)
 
         await section_a(check)
 

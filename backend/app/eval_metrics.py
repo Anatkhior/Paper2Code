@@ -239,8 +239,31 @@ def markdown_table(aggregate_report: dict[str, Any], *, provider_label: str, not
         f"| 引用总数 / 通过核验 | {aggregate_report.get('citations_verified')}/{aggregate_report.get('citations_total')} |"
     )
     lines.append(
-        f"| 平均工具调用 / 总用时 | {aggregate_report.get('tool_calls_total')} 次 / {aggregate_report.get('seconds_total')}s |"
+        f"| 工具调用总数 / 总用时（计分篇目的定位阶段） | {aggregate_report.get('tool_calls_total')} 次 / {aggregate_report.get('seconds_total')}s |"
     )
+    # 只有跑完的篇目进汇总——所以必须把"几篇里算了几篇"写在表里，
+    # 否则挂掉的难题会悄悄从分母里消失，数字反而更好看
+    attempted = aggregate_report.get("pairs_attempted")
+    if attempted is not None:
+        cell = f"{aggregate_report.get('pairs')}/{attempted}"
+        unscored = aggregate_report.get("pairs_unscored") or []
+        if unscored:
+            cell += "（未计入：" + "、".join(f"{item['id']} {item['status']}" for item in unscored) + "）"
+        if aggregate_report.get("pairs_partial"):
+            cell += f"；其中 {aggregate_report['pairs_partial']} 篇为提前交付"
+        lines.append(f"| 计入汇总的篇数 | {cell} |")
+        requested = aggregate_report.get("pairs_requested", attempted)
+        if attempted < requested:
+            lines.append(f"| 运行进度 | 已处理 {attempted}/{requested} 篇（本轮尚未完成） |")
+    usage = aggregate_report.get("usage_total")
+    if usage is not None:
+        tokens = usage.get("input_tokens")
+        lines.append(
+            f"| 已知输入 token / 墙钟用时（含侦察及失败篇目） | "
+            f"{tokens if tokens is not None else '未知'} / {aggregate_report.get('wall_clock_seconds_total')}s |"
+        )
+        if aggregate_report.get("pairs_usage_incomplete"):
+            lines.append(f"| 用量不完整的篇数 | {aggregate_report['pairs_usage_incomplete']}（未计未知用量） |")
     if note:
         lines.append("")
         lines.append(note)

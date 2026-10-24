@@ -1,1 +1,1 @@
-"""PaperLens 后端。"""
+"""Paper2code 后端。"""
