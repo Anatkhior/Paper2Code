@@ -1,4 +1,17 @@
-import type { CreateRunResponse, OutputLanguage, ProviderConfig, SmokeResult } from "./types";
+import type { CreateRunResponse, HistoryEntry, RunSnapshot, RunEvent, OutputLanguage, ProviderConfig, SmokeResult } from "./types";
+
+export async function fetchHistory(query: string, offset = 0, signal?: AbortSignal): Promise<{ items: HistoryEntry[]; total: number; limit: number }> {
+  const params = new URLSearchParams({ q: query, offset: String(offset), limit: "20" });
+  return jsonOrThrow(await fetch(`${API_BASE}/api/runs?${params}`, { signal, cache: "no-store" }));
+}
+
+export async function fetchSnapshot(runId: string, signal?: AbortSignal): Promise<RunSnapshot> {
+  return jsonOrThrow(await fetch(`${API_BASE}/api/runs/${encodeURIComponent(runId)}/snapshot`, { signal, cache: "no-store" }));
+}
+
+export async function fetchTrace(runId: string, before: number): Promise<{ events: RunEvent[]; has_more: boolean; warnings: string[] }> {
+  return jsonOrThrow(await fetch(`${API_BASE}/api/runs/${encodeURIComponent(runId)}/trace?before=${before}`, { cache: "no-store" }));
+}
 
 /** 后端地址。本地开发默认 8000；换端口就设 NEXT_PUBLIC_API_BASE。 */
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";

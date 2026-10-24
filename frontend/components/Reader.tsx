@@ -315,7 +315,7 @@ export default function Reader({
               {annotations.unplaced.map((annotation) => <Annotation key={annotation.id} annotation={annotation} onOpenCode={onOpenCode} />)}
             </div>}
           </div>
-          {right.why && <p className="border-t border-neutral-200 px-3 py-2 text-xs leading-6 text-neutral-600 dark:border-neutral-800 dark:text-neutral-400">{right.why}</p>}
+          {right.why && <Markdown text={right.why} className="border-t border-neutral-200 px-3 py-2 text-xs leading-6 text-neutral-600 dark:border-neutral-800 dark:text-neutral-400" />}
         </>}
       </section>
       </div>

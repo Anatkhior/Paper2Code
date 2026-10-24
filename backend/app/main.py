@@ -20,21 +20,22 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from . import store
+from . import history, store
 from .agent.loop import run_agent
 from .agent.tools.base import Budget, Tool
 from .agent.tools.builtin import CHAT_FINISH, FINISH, M0_TOOLS, build_m0_system_prompt, build_m0_user_prompt
 from .agent.tools.findings import RECORD_FINDING, RECORD_PLAN
 from .agent.tools.paper_tools import PAPER_TOOLS
 from .agent.tools.repo_tools import REPO_TOOLS
+from .agent.tools.history_tools import READ_CHAT_HISTORY
 from .config import settings
-from .events import RunBus, load_events, to_sse
+from .events import RunBus, to_sse
 from .chat import (
     append_turn as append_chat_turn,
 )
@@ -94,11 +95,85 @@ def _registry(run_id: str) -> _Run:
     """拿到 run 的登记项；不存在就按磁盘上的痕迹恢复（进程重启 / 刷新页面之后依然可回放）。"""
     run = RUNS.get(run_id)
     if run is None:
-        if not store.meta_path(run_id).exists():
-            raise HTTPException(status_code=404, detail=f"未知的 run_id: {run_id}")
-        run = _Run(run_id, RunBus(run_id, store.events_path(run_id)))
+        _require_saved_run(run_id)
+        try:
+            entry = history.recover_run(run_id)
+            run = _Run(run_id, _new_bus(run_id))
+        except (ValueError, OSError) as exc:
+            raise HTTPException(status_code=409, detail=f"运行记录无法读取，请修复后重试：{exc}") from exc
+        run.created_at = entry["created_at"]
+        run.phase = (entry.get("latest_operation") or {}).get("phase")
         RUNS[run_id] = run
     return run
+
+
+def _require_saved_run(run_id: str) -> None:
+    try:
+        exists = store.meta_path(run_id).is_file()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not exists:
+        raise HTTPException(status_code=404, detail=f"未知的 run_id: {run_id}")
+
+
+def _new_bus(run_id: str) -> RunBus:
+    return RunBus(run_id, store.events_path(run_id), lambda event: history.record_event(run_id, event))
+
+
+def _begin_operation(run: _Run, phase: str, cfg: ProviderConfig) -> None:
+    run.phase = phase
+    run.bus.operation_id = history.begin_operation(run.run_id, phase, cfg.safe_summary())
+    run.bus.cancel_status = "interrupted"
+    run.bus.cancel_reason = "服务停止，任务已中断；已保存的内容保留。"
+
+
+def _launch(run: _Run, job) -> None:
+    """Every accepted operation gets a durable terminal state, including setup failures."""
+    operation_id = run.bus.operation_id
+
+    async def execute() -> None:
+        try:
+            await job()
+        except asyncio.CancelledError:
+            if not _ended():
+                await run.bus.emit("run_end", status=run.bus.cancel_status, stopped_reason=run.bus.cancel_reason)
+            raise
+        except Exception as exc:
+            await run.bus.emit("error", kind=type(exc).__name__, message=str(exc)[:500])
+            if not _ended():
+                await run.bus.emit("run_end", status="failed", stopped_reason=str(exc)[:500])
+
+    def _ended() -> bool:
+        return any(event["type"] == "run_end" and event.get("operation_id") == operation_id for event in run.bus.history)
+
+    run.task = asyncio.create_task(execute())
+
+
+@app.get("/api/runs")
+async def get_history(q: str = Query(default="", max_length=200), offset: int = Query(default=0, ge=0),
+                      limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
+    active = {key for key, run in RUNS.items() if run.task and not run.task.done()}
+    # Index migration is local file I/O, and must not stall live SSE.
+    return await asyncio.to_thread(history.list_history, query=q, offset=offset, limit=limit, active_ids=active)
+
+
+@app.get("/api/runs/{run_id}/snapshot")
+async def get_snapshot(run_id: str) -> dict[str, Any]:
+    _require_saved_run(run_id)
+    run = RUNS.get(run_id)
+    # No awaits between reading persisted state and taking the event cursor: same-loop
+    # writers cannot interleave. A client then subscribes strictly after this cursor.
+    return history.snapshot(run_id, active=bool(run and run.task and not run.task.done()),
+                            events=run.bus.history if run else None)
+
+
+@app.get("/api/runs/{run_id}/trace")
+async def get_trace(run_id: str, before: int = Query(ge=1), limit: int = Query(default=100, ge=1, le=200)) -> dict:
+    _require_saved_run(run_id)
+    warnings: list[str] = []
+    events = history.read_journal(store.events_path(run_id), warnings)
+    earlier = [event for event in events if event["id"] < before]
+    return {"events": earlier[-limit:], "has_more": len(earlier) > limit, "warnings": warnings}
 
 
 async def _require_idle(run: _Run) -> None:
@@ -163,7 +238,7 @@ async def create_run(
         raise HTTPException(status_code=400, detail="这不是一个 PDF 文件")
 
     run_id = store.new_run_id()
-    directory = store.run_dir(run_id)
+    directory = store.run_dir(run_id, create=True)
     path = store.paper_path(run_id)
     path.write_bytes(data)
 
@@ -190,8 +265,9 @@ async def create_run(
         "bytes": len(data),
         "filename": file.filename,
     }
-    store.write_meta(run_id, paper=paper_meta, provider_label=cfg.safe_label(), output_language=output_language)
-    bus = RunBus(run_id, store.events_path(run_id))
+    store.write_meta(run_id, paper=paper_meta, original_provider=cfg.safe_summary(), output_language=output_language)
+    history.index_entry(run_id)
+    bus = _new_bus(run_id)
     RUNS[run_id] = _Run(run_id, bus)
 
     await bus.emit("paper_ready", paper=paper_meta, provider=cfg.safe_label())
@@ -234,6 +310,13 @@ async def start_recon(run_id: str, req: ReconRequest) -> dict[str, Any]:
     directory = store.run_dir(run_id)
     tools: list[Tool] = [*PAPER_TOOLS, RECORD_PLAN]
 
+    async def _finalize(result: dict[str, Any]) -> dict[str, Any]:
+        summary = dict(result)
+        if summary.get("plan") is None:
+            summary["plan"] = (store.read_json(directory / "plan.json") or {}).get("plan")
+        store.write_json(directory / "plan.json", summary)
+        return {}
+
     async def _job() -> None:
         doc = PaperDocument(store.paper_path(run_id), cache_dir=directory / "cache")
         try:
@@ -249,19 +332,13 @@ async def start_recon(run_id: str, req: ReconRequest) -> dict[str, Any]:
                 budget=_budget(),
                 run_dir_path=directory,
                 paper=doc,
+                finalize=_finalize,
                 meta={"phase": "recon", "provider_label": req.provider.safe_label(), "output_language": language},
             )
         finally:
             doc.close()
-        summary = dict(run.summary or {})
-        if summary.get("plan") is None:
-            # 这次侦察没交出清单（失败 / 预算用尽 / 模型没调用 record_plan）：
-            # 不能拿空清单覆盖 plan.json——里面可能有用户划选加的目标和上一版清单。
-            previous = store.read_json(directory / "plan.json") or {}
-            summary["plan"] = previous.get("plan")
-        store.write_json(directory / "plan.json", summary)
-
-    run.task = asyncio.create_task(_job())
+    _begin_operation(run, "recon", req.provider)
+    _launch(run, _job)
     return {"run_id": run_id, "phase": "recon", "started": True}
 
 
@@ -540,7 +617,8 @@ async def start_locate(run_id: str, req: LocateRequest) -> dict[str, Any]:
             },
         )
 
-    run.task = asyncio.create_task(_job())
+    _begin_operation(run, "locate", req.provider)
+    _launch(run, _job)
     return {
         "run_id": run_id,
         "phase": "locate",
@@ -567,7 +645,10 @@ def _artifact(run_id: str) -> dict[str, Any] | None:
 
 
 def _repo_info(run_id: str) -> dict[str, Any] | None:
-    """repo_ready 是当前克隆版本的事实来源，阶段结束前和重启回放后均可读取。"""
+    """Saved conclusions always read the commit they cite, never a newer checkout."""
+    pinned = ((_artifact(run_id) or {}).get("run") or {}).get("repo")
+    if pinned:
+        return pinned
     for event in reversed(_registry(run_id).bus.history):
         if event["type"] == "repo_ready":
             return event["data"]["repo"]
@@ -594,7 +675,7 @@ def _chat_tools(run_id: str) -> tuple[list[Tool], PaperDocument | None, RepoSour
         repo = RepoSource(repo_dir, repo_info["commit_sha"])
         tools.extend(REPO_TOOLS)
 
-    tools.append(CHAT_FINISH)
+    tools.extend([READ_CHAT_HISTORY, CHAT_FINISH])
     return tools, paper, repo
 
 
@@ -615,16 +696,21 @@ async def post_chat(run_id: str, req: ChatRequest) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail="消息不能为空")
 
     directory = store.run_dir(run_id)
+    saved = history.snapshot(run_id, active=False, events=run.bus.history)
+    if not saved["can_chat"]:
+        raise HTTPException(status_code=409, detail="历史文件存在读取错误，请修复后再追问：" + "；".join(saved["warnings"]))
     tools, paper, repo = _chat_tools(run_id)
-    artifact = _artifact(run_id)
-    history = load_transcript(run_id)
+    artifact = saved["artifact"] or {"innovations": saved["findings"], "run": {"repo": saved["repo"]}}
+    transcript = saved["turns"]
     user_prompt = build_chat_user_prompt(
-        build_context_block(artifact, req.context_ids),
-        build_chat_prompt(history, question, req.context_ids),
+        build_context_block(artifact, req.context_ids, plan=saved["plan"], paper=saved["paper"]),
+        build_chat_prompt(transcript, question, req.context_ids),
     )
 
-    store.write_meta(run_id, output_language=language)
-    append_chat_turn(run_id, "user", question, context_ids=req.context_ids, output_language=language)
+    _begin_operation(run, "chat", req.provider)
+    provenance = {"provider": req.provider.safe_summary(), "operation_id": run.bus.operation_id,
+                  "repo_commit": repo.commit_sha if repo else None}
+    append_chat_turn(run_id, "user", question, context_ids=req.context_ids, output_language=language, **provenance)
     await run.bus.emit("chat_user", message=question, context_ids=req.context_ids)
 
     budget = Budget(
@@ -650,6 +736,7 @@ async def post_chat(run_id: str, req: ChatRequest) -> dict[str, Any]:
             tools_used=tools_used,
             citations=citations,
             stopped_reason=result.get("stopped_reason"),
+            **provenance,
             **completion,
         )
         await bus.emit(
@@ -685,7 +772,7 @@ async def post_chat(run_id: str, req: ChatRequest) -> dict[str, Any]:
             if paper is not None:
                 paper.close()
 
-    run.task = asyncio.create_task(_job())
+    _launch(run, _job)
     return {"run_id": run_id, "started": True, "context_ids": req.context_ids}
 
 
@@ -781,7 +868,7 @@ async def run_pdf(run_id: str) -> FileResponse:
     而且是**真实排版**——公式、图、表格都在。我们只负责把文件给它。
     （代价：PDF 阅读器里的文字选不中给外层用，所以"划选加目标"要走文本视图。）
     """
-    _registry(run_id)
+    _require_saved_run(run_id)
     pdf = store.paper_path(run_id)
     if not pdf.exists():
         raise HTTPException(status_code=409, detail="这个 run 还没有论文")
@@ -800,7 +887,7 @@ async def run_paper_page(run_id: str, page: int, quote: str = "") -> dict[str, A
     前端"原版页面"视图据此叠高亮框——因为浏览器内置 PDF 阅读器不允许外部脚本碰它的 DOM，
     所以高亮必须由我们自己画（2026-09-16 用户实测 `#search=` 在 Chrome 上不生效）。
     """
-    _registry(run_id)
+    _require_saved_run(run_id)
     pdf = store.paper_path(run_id)
     if not pdf.exists():
         raise HTTPException(status_code=409, detail="这个 run 还没有论文")
@@ -840,8 +927,8 @@ class AnalyzeRequest(BaseModel):
 @app.post("/api/analyze")
 async def analyze(req: AnalyzeRequest) -> dict[str, Any]:
     run_id = store.new_run_id()
-    directory = store.run_dir(run_id)
-    bus = RunBus(run_id, store.events_path(run_id))
+    directory = store.run_dir(run_id, create=True)
+    bus = _new_bus(run_id)
     run = _Run(run_id, bus)
     run.phase = "m0"
     RUNS[run_id] = run
@@ -860,7 +947,8 @@ async def analyze(req: AnalyzeRequest) -> dict[str, Any]:
         )
         store.write_json(directory / "analysis.json", run.summary)
 
-    run.task = asyncio.create_task(_job())
+    _begin_operation(run, "m0", req.provider)
+    _launch(run, _job)
     return {"run_id": run_id, "events_url": f"/api/runs/{run_id}/events", "provider": req.provider.safe_label()}
 
 
@@ -874,17 +962,26 @@ async def run_events(run_id: str, request: Request) -> EventSourceResponse:
     last_id = 0
     for raw in (request.headers.get("last-event-id"), request.query_params.get("from_id")):
         if raw and str(raw).isdigit():
-            last_id = int(raw)
+            last_id = max(last_id, int(raw))
 
     async def publisher():
+        def idle():
+            return {"event": "stream_idle", "data": '{"type":"stream_idle"}'}
+
+        replay_cursor = run.bus.cursor
+        if last_id >= replay_cursor and (run.task is None or run.task.done()):
+            yield idle()
+            return
         async for event in run.bus.subscribe(last_id):
             if await request.is_disconnected():
                 break
             yield to_sse(event)
-            # 已经结束的 run：把历史（含 run_end）送完就收，别让刷新页面的客户端一直挂着。
-            # task is None 的情形是「后端重启后从磁盘恢复的 run」：内存里没有任务，
-            # 但历史里有 run_end 就说明它已经结束，同样要收尾——否则回放完就永远挂着。
-            if event["type"] == "run_end" and (run.task is None or run.task.done()):
+            # Completion can race with a slow subscriber draining queued events.
+            # Close only after the CURRENT watermark, not the one at connection time.
+            finished = run.task is None or run.task.done()
+            terminal = event["type"] == "run_end" and event.get("operation_id") == run.bus.operation_id
+            if event["id"] >= run.bus.cursor and (finished or terminal):
+                yield idle()
                 break
 
     return EventSourceResponse(publisher(), ping=15)
@@ -893,7 +990,9 @@ async def run_events(run_id: str, request: Request) -> EventSourceResponse:
 @app.get("/api/runs/{run_id}")
 async def run_detail(run_id: str) -> dict[str, Any]:
     run = _registry(run_id)
-    finished = run.task is not None and run.task.done()
+    snapshot = await get_snapshot(run_id)
+    operation = snapshot["history"].get("latest_operation") or {}
+    finished = bool(operation) and operation.get("status") != "running"
     directory = store.run_dir(run_id)
     # 交付物优先：阶段 B 的 artifact.json > 阶段 A 的 plan.json > 内存里的 summary
     artifact = (
@@ -905,11 +1004,12 @@ async def run_detail(run_id: str) -> dict[str, Any]:
         "run_id": run_id,
         "phase": run.phase,
         "finished": finished,
-        "cancelled": bool(run.task and run.task.cancelled()),
+        "cancelled": operation.get("status") == "cancelled",
         "summary": run.summary,
         "artifact": artifact,
         "meta": store.read_meta(run_id),
-        "events": run.bus.history or load_events(store.events_path(run_id)),
+        "events": run.bus.history,
+        "history": snapshot["history"],
     }
 
 
@@ -920,7 +1020,7 @@ async def run_paper_page_image(run_id: str, page: int, dpi: int = 150) -> Respon
     为什么不是直接内嵌原 PDF：内置阅读器不让脚本注入高亮（见上面那个端点的说明）。
     渲染图 + 我们自己叠的高亮框 → 任何浏览器表现一致，公式与图也照旧是原样渲染出来的。
     """
-    _registry(run_id)
+    _require_saved_run(run_id)
     pdf = store.paper_path(run_id)
     if not pdf.exists():
         raise HTTPException(status_code=409, detail="这个 run 还没有论文")
@@ -941,6 +1041,15 @@ async def run_paper_page_image(run_id: str, page: int, dpi: int = 150) -> Respon
 async def run_cancel(run_id: str) -> dict[str, Any]:
     run = _registry(run_id)
     if run.task and not run.task.done():
+        run.bus.cancel_status = "cancelled"
+        run.bus.cancel_reason = "用户取消"
         run.task.cancel()
+        try:
+            await run.task
+        except asyncio.CancelledError:
+            pass
+        # Cancellation before the coroutine's first instruction skips its finally/except.
+        if (history.index_entry(run_id).get("latest_operation") or {}).get("status") == "running":
+            await run.bus.emit("run_end", status="cancelled", stopped_reason="用户取消")
         return {"cancelled": True, "run_id": run_id}
     return {"cancelled": False, "run_id": run_id, "reason": "already finished"}

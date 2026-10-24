@@ -13,7 +13,9 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
+
+from .store import append_jsonl
 
 
 class RunBus:
@@ -25,12 +27,16 @@ class RunBus:
     先连流的浏览器永远收不到新事件——界面上表现为卡在"侦察中"。）
     """
 
-    def __init__(self, run_id: str, jsonl_path: Path) -> None:
+    def __init__(self, run_id: str, jsonl_path: Path, on_event: Callable | None = None) -> None:
         self.run_id = run_id
         self.jsonl_path = jsonl_path
         self._events: list[dict[str, Any]] = load_events(jsonl_path)
         self._subscribers: set[asyncio.Queue[dict[str, Any] | None]] = set()
         self._lock = asyncio.Lock()
+        self.on_event = on_event
+        self.operation_id: str | None = None
+        self.cancel_status = "cancelled"
+        self.cancel_reason = "用户取消"
 
     # -- 写入 ---------------------------------------------------------------
     async def emit(self, type_: str, **data: Any) -> dict[str, Any]:
@@ -40,10 +46,12 @@ class RunBus:
                 "type": type_,
                 "ts": time.time(),
                 "data": data,
+                "operation_id": self.operation_id,
             }
+            append_jsonl(self.jsonl_path, event)
             self._events.append(event)
-            with self.jsonl_path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+            if self.on_event:
+                self.on_event(event)
             for queue in list(self._subscribers):
                 queue.put_nowait(event)
         return event
@@ -52,6 +60,10 @@ class RunBus:
     @property
     def history(self) -> list[dict[str, Any]]:
         return list(self._events)
+
+    @property
+    def cursor(self) -> int:
+        return self._events[-1]["id"] if self._events else 0
 
     async def subscribe(self, last_event_id: int = 0) -> AsyncIterator[dict[str, Any]]:
         """先补发历史（id > last_event_id），再接实时流。
@@ -88,11 +100,9 @@ def to_sse(event: dict[str, Any]) -> dict[str, str]:
 
 def load_events(jsonl_path: Path) -> list[dict[str, Any]]:
     """从 events.jsonl 回放（刷新页面 / 缓存命中时用）。"""
-    if not jsonl_path.exists():
-        return []
-    events = []
-    for line in jsonl_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            events.append(json.loads(line))
+    from .history import read_journal
+    warnings: list[str] = []
+    events = read_journal(jsonl_path, warnings)
+    if warnings:
+        raise ValueError("；".join(warnings))
     return events

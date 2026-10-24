@@ -132,6 +132,8 @@ async def _record_plan(args: dict, ctx: ToolContext) -> ToolResult:
             evidence["verified"] = match in {"full", "partial"} if paper else None
 
     ctx.state["plan"] = plan_payload
+    from ...plan import save_plan
+    save_plan(ctx.run_id, plan_payload)
 
     summary = {
         "innovations": len(plan_payload["innovations"]),

@@ -1,5 +1,6 @@
 @import "tailwindcss";
 @import "pdfjs-dist/web/pdf_viewer.css";
+@import "katex/dist/katex.min.css";
 
 :root {
   --background: #ffffff;
@@ -9,8 +10,8 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-plex-sans), var(--font-noto-sans-sc), sans-serif;
+  --font-mono: var(--font-plex-mono), var(--font-noto-sans-sc), monospace;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -23,8 +24,18 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans);
 }
+
+.markdown { min-width: 0; overflow-wrap: anywhere; }
+.markdown pre > .md-code { background: none; padding: 0; font-size: inherit; }
+.markdown .katex { font-size: 1.08em; overflow-wrap: normal; }
+.markdown .katex-display { max-width: 100%; overflow-x: auto; overflow-y: hidden; padding: 0.25rem 0 0.5rem; }
+.markdown .katex-display > .katex { text-align: left; }
+.markdown .katex .cjk_fallback { font-family: var(--font-sans); }
+.markdown .katex-error { white-space: pre-wrap; overflow-wrap: anywhere; }
+.markdown-inline > span:last-child > br:last-child { display: none; }
+.markdown-inline .katex-display { display: inline-block; margin: 0; vertical-align: middle; }
 
 
 /* 目录始终完整铺开；条目数量不会变成不可发现的横向溢出。 */

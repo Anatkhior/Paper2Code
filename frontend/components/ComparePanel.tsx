@@ -5,6 +5,7 @@ import Markdown from "@/components/Markdown";
 import { FindingStatus, PaperEvidenceList } from "@/components/Evidence";
 
 interface Props {
+  readOnly?: boolean;
   finding: Finding | undefined;
   missing: boolean;
   busy: boolean;
@@ -20,10 +21,10 @@ function VerifyBadge({ state }: { state?: string }) {
   return <span className="text-xs text-neutral-500">待核验</span>;
 }
 
-export default function ComparePanel({ finding, missing, busy, selected, onOpenPaper, onOpenCode, onAsk }: Props) {
+export default function ComparePanel({ finding, missing, busy, selected, onOpenPaper, onOpenCode, onAsk, readOnly }: Props) {
   if (!finding) {
     return <p className={`mt-5 border-t border-neutral-200 pt-4 text-sm dark:border-neutral-800 ${missing ? "text-amber-700 dark:text-amber-400" : "text-neutral-500"}`}>
-      {missing ? "本轮未产出这条结论。请查看行动轨迹中的结束原因；这不等于未找到实现。" : busy && selected ? "正在定位，结论会在这里逐步出现。" : selected ? "已选中这条创新点，开始定位后在这里阅读结果。" : "这条尚未选中。勾选后可定位对应实现。"}
+      {readOnly ? busy ? "后台仍在定位，已保存的结论会逐步显示。" : "这份历史尚未保存这条创新点的代码定位结论，可以在下方继续追问。" : missing ? "本轮未产出这条结论。请查看行动轨迹中的结束原因；这不等于未找到实现。" : busy && selected ? "正在定位，结论会在这里逐步出现。" : selected ? "已选中这条创新点，开始定位后在这里阅读结果。" : "这条尚未选中。勾选后可定位对应实现。"}
     </p>;
   }
 
@@ -37,12 +38,12 @@ export default function ComparePanel({ finding, missing, busy, selected, onOpenP
         <button type="button" onClick={() => onAsk(finding.id, finding.name ?? finding.id)} className="ml-auto text-xs text-teal-700 underline underline-offset-4 dark:text-teal-300">就这条追问 ↗</button>
       </header>
 
-      {explanation?.intuition && <section className="reading-section">
+      {(explanation?.intuition || explanation?.math) && <section className="reading-section">
         <h4>它在做什么</h4>
-        <Markdown text={explanation.intuition} />
+        {explanation.intuition && <Markdown text={explanation.intuition} />}
         {explanation.math && <details className="mt-3">
           <summary className="text-xs text-neutral-500">公式 · 模型重构，非论文原文</summary>
-          <code className="mt-2 block whitespace-pre-wrap rounded bg-neutral-100 p-3 text-xs dark:bg-neutral-900">{explanation.math}</code>
+          <Markdown math text={explanation.math} className="mt-2 rounded bg-neutral-100 p-3 dark:bg-neutral-900" />
         </details>}
       </section>}
 
@@ -83,9 +84,9 @@ export default function ComparePanel({ finding, missing, busy, selected, onOpenP
       <details className="reading-disclosure">
         <summary>阅读提示与判断依据</summary>
         <div className="mt-4 space-y-4 text-sm leading-7">
-          {!!explanation?.pitfalls?.length && <div><h5 className="font-medium">容易搞错的地方</h5><ul className="list-disc pl-5">{explanation.pitfalls.map((pitfall) => <li key={pitfall}>{pitfall}</li>)}</ul></div>}
+          {!!explanation?.pitfalls?.length && <div><h5 className="font-medium">容易搞错的地方</h5><ul className="list-disc pl-5">{explanation.pitfalls.map((pitfall) => <li key={pitfall}><Markdown text={pitfall} /></li>)}</ul></div>}
           {!!explanation?.read_next?.length && <div><h5 className="font-medium">接下来读</h5><p className="font-mono text-xs">{explanation.read_next.join(" · ")}</p></div>}
-          <p className="text-xs text-neutral-500">置信度理由：{finding.confidence_reason}</p>
+          <p className="text-xs text-neutral-500">置信度理由：<Markdown inline text={finding.confidence_reason} /></p>
         </div>
       </details>
     </article>

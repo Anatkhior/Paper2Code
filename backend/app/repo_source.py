@@ -533,6 +533,7 @@ def run_git(args: list[str], cwd: Path, *, timeout: int = 60) -> subprocess.Comp
             env=_git_env(),
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=timeout,
             check=False,
         )
@@ -1332,6 +1333,7 @@ class RepoSource:
     def __init__(self, root: Path, commit_sha: str) -> None:
         self.root = Path(root).resolve()
         self.commit_sha = commit_sha
+        self._entries: dict[str, dict] | None = None
 
     # -- 路径安全 -----------------------------------------------------------
     def resolve(self, relative: str) -> Path:
@@ -1356,61 +1358,58 @@ class RepoSource:
 
     # -- 遍历 ---------------------------------------------------------------
     def iter_files(self, subdir: str = "", *, limit: int = MAX_SEARCH_FILES) -> list[Path]:
-        base = self.resolve(subdir) if subdir else self.root
-        if base.is_file():
-            return [base]
-        if any(part in SKIP_DIRS for part in base.relative_to(self.root).parts):
-            return []
-        out: list[Path] = []
-        for path in _walk_files(base):
-            out.append(path)
-            if len(out) >= limit:
-                break
-        return out
+        if subdir:
+            self.resolve(subdir)
+        return [self.root / name for name, entry in self._commit_entries().items()
+                if entry["type"] == "file" and (not subdir or name == subdir or name.startswith(subdir.rstrip("/") + "/"))][:limit]
+
+    def _commit_entries(self) -> dict[str, dict]:
+        if self._entries is not None:
+            return self._entries
+        # Do not ask ls-tree for every blob size: partial clones may fetch large
+        # skipped assets just to obtain their metadata. Inspect text candidates on demand.
+        result = run_git(["ls-tree", "-r", "-t", "-z", self.commit_sha], cwd=self.root, timeout=20)
+        if result.returncode:
+            raise RepoError(f"历史 commit {self.commit_sha[:12]} 不在本机仓库中")
+        entries = {}
+        for row in result.stdout.split("\0"):
+            if not row:
+                continue
+            header, name = row.split("\t", 1)
+            mode, kind, _ = header.split()
+            if any(part in SKIP_DIRS for part in Path(name).parts):
+                continue
+            entry_type = "dir" if kind == "tree" else "file" if mode in {"100644", "100755"} else "symlink"
+            entries[name] = {"path": name, "type": entry_type, "size": None}
+        self._entries = entries
+        return entries
+
+    def _file_size(self, relative: str) -> int:
+        entry = self._commit_entries()[relative]
+        if entry["size"] is None:
+            result = run_git(["cat-file", "-s", f"{self.commit_sha}:{relative}"], cwd=self.root, timeout=20)
+            if result.returncode or not result.stdout.strip().isdigit():
+                raise RepoError(f"无法读取历史文件的大小：{relative}")
+            entry["size"] = int(result.stdout.strip())
+        return entry["size"]
 
     def tree(self, subdir: str = "", depth: int = 2, max_rows: int = 400) -> dict:
-        base = self.resolve(subdir) if subdir else self.root
-        if not base.exists():
+        if subdir:
+            self.resolve(subdir)
+        entries = self._commit_entries()
+        if subdir and subdir.rstrip("/") not in entries:
             raise RepoError(f"目录不存在：{subdir or '.'}")
-        rows: list[dict] = []
-        truncated = False
-        root_depth = len(base.relative_to(self.root).parts)
-        for path in sorted(base.rglob("*")):
-            relative_parts = path.relative_to(self.root).parts
-            if any(part in SKIP_DIRS for part in relative_parts):
-                continue
-            if len(relative_parts) - root_depth > depth:
-                continue
-            if path.is_symlink():
-                kind, size = "symlink", None    # 不跟随：不暴露链接目标的类型与大小
-            elif path.is_dir():
-                kind, size = "dir", None
-            else:
-                kind, size = "file", path.stat().st_size if path.is_file() else None
-            rows.append({"path": path.relative_to(self.root).as_posix(), "type": kind, "size": size})
-            if len(rows) >= max_rows:
-                truncated = True
-                break
-        return {"subdir": subdir or ".", "rows": rows, "truncated": truncated, "skipped_dirs": sorted(SKIP_DIRS)}
+        prefix = subdir.rstrip("/") + "/" if subdir else ""
+        rows = [entry for name, entry in sorted(entries.items()) if name.startswith(prefix)
+                and len(Path(name[len(prefix):]).parts) <= depth]
+        return {"subdir": subdir or ".", "rows": rows[:max_rows], "truncated": len(rows) > max_rows, "skipped_dirs": sorted(SKIP_DIRS)}
 
     # -- 读文件 -------------------------------------------------------------
     def line_count(self, relative: str) -> int:
-        path = self.resolve(relative)
-        if not path.is_file():
-            raise RepoError(f"不是文件：{relative}")
-        return len(path.read_text(encoding="utf-8", errors="replace").splitlines())
+        return len(text_lines(self.content_at_commit(relative)))
 
     def read_file(self, relative: str, start: int | None = None, end: int | None = None) -> dict:
-        path = self.resolve(relative)
-        if not path.is_file():
-            raise RepoError(f"文件不存在：{relative}")
-        size = path.stat().st_size
-        if size > MAX_TEXT_FILE_BYTES:
-            raise RepoError(f"文件 {relative} 有 {size / 1024 / 1024:.1f}MB，超过单文件读取上限")
-        if not is_probably_text(path):
-            raise RepoError(f"{relative} 看起来是二进制文件，读不了")
-
-        raw = text_lines(path.read_text(encoding="utf-8", errors="replace"))
+        raw = text_lines(self.content_at_commit(relative))
         total = len(raw)
         first = max(1, start or 1)
         last = min(end or total, total)
@@ -1457,31 +1456,30 @@ class RepoSource:
 
         # 先按 glob/后缀过滤、再计数：原来是先截前 4000 个文件再过滤，而且截断永远不会被标出来
         # ——仓库文件多于 4000 时只扫了一部分，却回报"扫完了整个仓库"，模型据此报 not_found。
-        for path in _walk_files(self.root):
+        for relative, entry in self._commit_entries().items():
+            if entry["type"] != "file":
+                continue
             if time.monotonic() - started > MAX_SEARCH_SECONDS:
                 timed_out = True
                 break
-            relative = self.rel(path)
             if path_filter is not None and not path_filter.fullmatch(relative):
                 continue
-            if path.suffix.lower() in BINARY_SUFFIXES:
+            if Path(relative).suffix.lower() in BINARY_SUFFIXES:
                 continue
             if scanned >= MAX_SEARCH_FILES:
                 truncated_files = True            # 还有候选文件没扫到
                 break
             scanned += 1
-            try:
-                if path.stat().st_size > MAX_TEXT_FILE_BYTES or not is_probably_text(path):
-                    continue
-                for number, line in enumerate(
-                    path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1
-                ):
-                    if regex.search(line):
-                        hits.append({"path": relative, "line": number, "text": line.strip()[:240]})
-                        if len(hits) >= max_hits:
-                            break
-            except OSError:
+            if self._file_size(relative) > MAX_TEXT_FILE_BYTES:
                 continue
+            content = self.content_at_commit(relative, allow_binary=True)
+            if "\0" in content[:8192]:
+                continue
+            for number, line in enumerate(content.splitlines(), start=1):
+                if regex.search(line):
+                    hits.append({"path": relative, "line": number, "text": line.strip()[:240]})
+                    if len(hits) >= max_hits:
+                        break
             if len(hits) >= max_hits:
                 break
 
@@ -1499,12 +1497,18 @@ class RepoSource:
         }
 
     # -- 核验用：直接从 git 对象里取内容（真正的"重放"，不依赖工作区是否被改动）--
-    def content_at_commit(self, relative: str, *, timeout: int = 20) -> str:
-        if relative.startswith("-") or "\0" in relative:
-            raise RepoError("非法路径")
+    def content_at_commit(self, relative: str, *, timeout: int = 20, allow_binary: bool = False) -> str:
+        self.resolve(relative)
+        entry = self._commit_entries().get(relative)
+        if not entry or entry["type"] == "dir":
+            raise RepoError(f"文件不存在于 commit {self.commit_sha[:8]}：{relative}")
+        if self._file_size(relative) > MAX_TEXT_FILE_BYTES:
+            raise RepoError(f"文件 {relative} 超过单文件读取上限")
         result = run_git(["show", f"{self.commit_sha}:{relative}"], cwd=self.root, timeout=timeout)
         if result.returncode != 0:
             raise RepoError(f"在 commit {self.commit_sha[:8]} 上找不到文件：{relative}")
+        if not allow_binary and "\0" in result.stdout[:8192]:
+            raise RepoError(f"{relative} 看起来是二进制文件，读不了")
         return result.stdout
 
     def commit_exists(self) -> bool:

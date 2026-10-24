@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 
 import type { RunEvent } from "@/lib/types";
+import Markdown from "@/components/Markdown";
 
 type Item =
   | { kind: "event"; event: RunEvent }
@@ -157,7 +158,7 @@ export default function Timeline({
           if (item.kind === "text") {
             return (
               <li key={`text-${item.firstId}`} className="ml-6 whitespace-pre-wrap text-sm text-neutral-800 dark:text-neutral-200">
-                {item.text}
+                <Markdown text={item.text} />
               </li>
             );
           }
@@ -167,7 +168,7 @@ export default function Timeline({
             <li key={item.event.id} className="border-b border-neutral-100 py-2 last:border-0 dark:border-neutral-900">
               <div className="flex items-start gap-2 text-xs leading-5">
                 <span className={info.tone}>{info.icon}</span>
-                <span className={`min-w-0 flex-1 break-words font-medium ${info.tone}`}>{info.title}</span>
+                <span className={`min-w-0 flex-1 break-words font-medium ${info.tone}`}>{item.event.type === "finding" ? <Markdown inline text={info.title} /> : info.title}</span>
               </div>
               <div className="mt-1 flex items-start gap-2 text-[10px] text-neutral-400">
                 <span className="shrink-0 font-mono">{offset}ms</span>

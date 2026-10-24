@@ -81,8 +81,14 @@ class ProviderConfig(BaseModel):
         """可以安全写进日志/前端的描述（绝对不含 key）。"""
         host = "官方端点"
         if self.base_url:
-            host = self.base_url.split("//", 1)[-1].split("/", 1)[0]
+            from urllib.parse import urlsplit
+            host = urlsplit(self.base_url).hostname or "未知端点"
         return f"{self.protocol} · {host} · {self.model}"
+
+    def safe_summary(self) -> dict[str, str]:
+        from urllib.parse import urlsplit
+        return {"protocol": self.protocol, "model": self.model,
+                "host": (urlsplit(self.base_url).hostname or "未知端点") if self.base_url else "官方端点"}
 
 
 class ToolCall(BaseModel):

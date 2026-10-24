@@ -1,12 +1,14 @@
 "use client";
 
-import { chatState, chatTurnsFromEvents } from "@/lib/chatState";
+import Link from "next/link";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { chatState } from "@/lib/chatState";
 import { migrateStorage, PROVIDER_STORAGE_KEY, TIMELINE_STORAGE_KEY } from "@/lib/providerStorage";
 import { DEFAULT_OUTPUT_LANGUAGE, normalizeOutputLanguage, OUTPUT_LANGUAGE_STORAGE_KEY } from "@/lib/language";
-
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-
-import ChatPanel, { type ChatTurn } from "@/components/ChatPanel";
+import { HISTORY_STATUS, providerChange } from "@/lib/session";
+import { useRunSession } from "@/lib/useRunSession";
+import ChatPanel from "@/components/ChatPanel";
+import Markdown from "@/components/Markdown";
 import ComparePanel from "@/components/ComparePanel";
 import CoverageCard from "@/components/CoverageCard";
 import PlanList, { PlanDetail } from "@/components/PlanList";
@@ -14,559 +16,229 @@ import ProviderForm from "@/components/ProviderForm";
 import Reader from "@/components/Reader";
 import { useReader } from "@/lib/useReader";
 import Timeline from "@/components/Timeline";
-import {
-  addPlanItem,
-  API_BASE,
-  createRun,
-  deletePlanItem,
-  eventsUrl,
-  fetchChat,
-  fetchPlan,
-  healthUrl,
-  paperPageImageUrl,
-  patchPlanItem,
-  pdfUrl,
-  postChat,
-  smokeTest,
-  startLocate,
-  startRecon,
-} from "@/lib/api";
-import {
-  EVENT_TYPES,
-  type Finding,
-  type OutputLanguage,
-  type PaperMeta,
-  type Plan,
-  type ProviderConfig,
-  type RunEvent,
-  type SmokeResult,
-  type VerificationSummary,
-} from "@/lib/types";
+import { addPlanItem, API_BASE, createRun, deletePlanItem, healthUrl, paperPageImageUrl,
+  patchPlanItem, pdfUrl, postChat, smokeTest, startLocate, startRecon } from "@/lib/api";
+import type { OutputLanguage, ProviderConfig, SmokeResult } from "@/lib/types";
 
-const STORAGE_KEY = PROVIDER_STORAGE_KEY;
-
-const EMPTY_PROVIDER: ProviderConfig = {
-  protocol: "openai-compatible",
-  base_url: "",
-  api_key: "",
-  model: "",
-};
-
-type Phase = "idle" | "uploading" | "recon" | "locate" | "done" | "error";
+const EMPTY_PROVIDER: ProviderConfig = { protocol: "openai-compatible", base_url: "", api_key: "", model: "" };
+const EMPTY_EVENTS: import("@/lib/types").RunEvent[] = [];
 
 export default function Home() {
-  const [chatTurns, setChatTurns] = useState<ChatTurn[]>([]);
-  const [chatBusy, setChatBusy] = useState(false);
-  const [chatAfterId, setChatAfterId] = useState(0);
+  const session = useRunSession();
+  const { snapshot, load, reset, refresh, connect, updatePlan, isCurrent } = session;
+  const runId = snapshot?.run_id ?? null;
+  const paper = snapshot?.paper ?? null;
+  const plan = snapshot?.plan ?? null;
+  const events = snapshot?.events ?? EMPTY_EVENTS;
+  const findings = snapshot?.findings ?? [];
+  const chatTurns = snapshot?.turns ?? [];
+  const [readOnly, setReadOnly] = useState(false);
+  const [pendingPhase, setPendingPhase] = useState<string | null>(null);
   const [chatScope, setChatScope] = useState<"current" | "all">("current");
-  const chatRef = useRef<HTMLDivElement>(null);
-
   const [notice, setNotice] = useState<string | null>(null);
-
-  const [plan, setPlan] = useState<Plan | null>(null);
-
+  const [error, setError] = useState<string | null>(null);
   const [provider, setProvider] = useState<ProviderConfig>(EMPTY_PROVIDER);
   const [outputLanguage, setOutputLanguage] = useState<OutputLanguage>(DEFAULT_OUTPUT_LANGUAGE);
   const [rememberKey, setRememberKey] = useState(false);
   const [smoke, setSmoke] = useState<SmokeResult | null>(null);
   const [smokeBusy, setSmokeBusy] = useState(false);
+  const smokeRevision = useRef(0);
+  const actionGeneration = useRef(0);
   const [backendUp, setBackendUp] = useState<boolean | null>(null);
-
   const [file, setFile] = useState<File | null>(null);
   const [repoUrl, setRepoUrl] = useState("");
-  const [locateBusy, setLocateBusy] = useState(false);
-  const [runId, setRunId] = useState<string | null>(null);
-  const [paper, setPaper] = useState<PaperMeta | null>(null);
-  const [events, setEvents] = useState<RunEvent[]>([]);
-  // 行动轨迹：宽屏是右侧常驻长条侧栏（窄、不占正文），默认展开——
-  // 用户要求"不论在哪个步骤都能看到轨迹的实时情况"。用户的选择记在 localStorage 里
   const [timelineOpen, setTimelineOpen] = useState(true);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [error, setError] = useState<string | null>(null);
-
-  /** 报错可能是第三方返回的一大页 HTML：先压成一句，完整内容丢控制台，别糊满屏幕。 */
-  const reportError = useCallback((caught: unknown) => {
-    const text = typeof caught === "string" ? caught : String(caught);
-    console.error(caught);
-    setError(text.length > 400 ? `${text.slice(0, 400)}…（完整信息见浏览器控制台）` : text);
-  }, []);
-
-  const sourceRef = useRef<EventSource | null>(null);
-  const chatAfterIdRef = useRef(0);
-  const chatPendingRef = useRef(false);
-  const activeRunRef = useRef(runId);
-  useEffect(() => { activeRunRef.current = runId; }, [runId]);
-  // 事件数组的镜像：openStream 需要在"重开流"时知道已经收到哪一条了，但又不该因此重建回调
-  // 清单出来后默认全选：省得用户以为"不勾就等于全跑"，也避免只勾一条时的意外
-  const autoSelectedRef = useRef(false);
-  const eventsRef = useRef<RunEvent[]>([]);
-  useEffect(() => {
-    eventsRef.current = events;
-  }, [events]);
-
-  // 阅读区始终跟随当前创新点；点击具体引用只覆盖当前条目的阅读目标。
-  const readerRef = useRef<HTMLDivElement>(null);
   const [setupOpen, setSetupOpen] = useState(true);
   const [readerOpen, setReaderOpen] = useState(true);
   const [readerTab, setReaderTab] = useState<"paper" | "code">("paper");
   const [activeId, setActiveId] = useState("");
-  const activeInnovation = plan?.innovations.find((item) => item.id === activeId) ?? plan?.innovations[0];
-  const findings = useMemo<Finding[]>(
-    () => Array.from(new Map(events
-      .filter((event) => event.type === "finding")
-      .map((event) => {
-        const finding = event.data.finding as Finding;
-        return [finding.id, finding] as const;
-      })).values()).filter((finding) => plan?.innovations.some((item) => item.id === finding.id)),
-    [events, plan],
-  );
-  const activeFinding = findings.find((finding) => finding.id === activeInnovation?.id);
-  const chatContext = useMemo(() => chatScope === "current" && activeInnovation ? { id: activeInnovation.id, name: activeInnovation.name } : null, [chatScope, activeInnovation]);
-  const repoVersion = useMemo(() => [...events].reverse().find((event) => event.type === "repo_ready")?.id ?? 0, [events]);
+  const chatRef = useRef<HTMLDivElement>(null);
+  const readerRef = useRef<HTMLDivElement>(null);
+  const activeInnovation = plan?.innovations.find(item => item.id === activeId) ?? plan?.innovations[0];
+  const activeFinding = findings.find(item => item.id === activeInnovation?.id);
+  const repoVersion = snapshot?.repo?.commit_sha ?? "";
   const { paperPane, codePane, selectPaper, selectCode, reset: clearReader } = useReader(runId, activeInnovation, activeFinding, repoVersion);
+  const operation = snapshot?.history.latest_operation;
+  const phase = pendingPhase ?? (snapshot?.active ? operation?.phase ?? "recon" : runId ? "done" : "idle");
+  const chatBusy = phase === "chat";
+  const busy = session.loading || ["uploading", "recon", "locate"].includes(phase);
+  const locateBusy = pendingPhase === "locate";
+  const chatContext = chatScope === "current" && activeInnovation ? { id: activeInnovation.id, name: activeInnovation.name } : null;
+  const chatProgress = useMemo(() => chatState(events), [events]);
+  const chatStreaming = chatBusy ? chatProgress.streaming : "";
+  const verification = snapshot?.verification ?? null;
+  const missingIds = snapshot?.artifact?.missing_ids ?? [];
+  const filesTotal = snapshot?.repo?.files_total ?? null;
+  const commitSha = snapshot?.repo?.commit_sha ?? null;
+  const runEnd = [...events].reverse().find(event => event.type === "run_end")?.data;
+  const paperReady = paper;
 
-  const activateInnovation = (id: string) => {
-    if (id === activeInnovation?.id) return;
-    setActiveId(id);
-    clearReader();
-  };
+  useEffect(() => {
+    let mounted = true;
+    void fetch(healthUrl()).then(response => { if (mounted) setBackendUp(response.ok); })
+      .catch(() => { if (mounted) setBackendUp(false); });
+    // Browser-only preferences and URL restoration run once after hydration.
+    queueMicrotask(() => {
+      if (!mounted) return;
+      try {
+        migrateStorage(window.localStorage);
+        const raw = window.localStorage.getItem(PROVIDER_STORAGE_KEY);
+        if (raw) {
+          const saved = JSON.parse(raw);
+          setProvider({ protocol: saved.protocol === "anthropic" ? "anthropic" : "openai-compatible",
+            base_url: typeof saved.base_url === "string" ? saved.base_url : "",
+            model: typeof saved.model === "string" ? saved.model : "",
+            api_key: saved.remember_key === true && typeof saved.api_key === "string" ? saved.api_key : "" });
+          setRememberKey(saved.remember_key === true);
+        }
+        setOutputLanguage(normalizeOutputLanguage(window.localStorage.getItem(OUTPUT_LANGUAGE_STORAGE_KEY)));
+        setTimelineOpen(window.localStorage.getItem(TIMELINE_STORAGE_KEY) !== "0");
+      } catch { setNotice("浏览器设置无法读取，请重新填写模型设置；本机历史不受影响。"); }
+      const id = new URLSearchParams(window.location.search).get("run");
+      if (id) { setReadOnly(true); setSetupOpen(false); void load(id); }
+    });
+    // Restore through a fresh GET-only page on back/forward; never replay mutation requests.
+    const navigate = () => window.location.reload();
+    window.addEventListener("popstate", navigate);
+    return () => { mounted = false; actionGeneration.current += 1; window.removeEventListener("popstate", navigate); };
+  }, [load]);
 
+  const activateInnovation = (id: string) => { setActiveId(id); clearReader(); };
   const scrollToReader = useCallback(() => {
     setReaderOpen(true);
     requestAnimationFrame(() => readerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
   }, []);
-
-  const openPaper = (page: number, quote: string) => {
-    selectPaper({ page, quote });
-    setReaderTab("paper");
-    scrollToReader();
-  };
-
-  const openCode = (path: string, start: number, end: number, why: string) => {
-    selectCode({ path, start, end, why });
-    setReaderTab("code");
-    scrollToReader();
-  };
-
+  const openPaper = (page: number, quote: string) => { selectPaper({ page, quote }); setReaderTab("paper"); scrollToReader(); };
+  const openCode = (path: string, start: number, end: number, why: string) => { selectCode({ path, start, end, why }); setReaderTab("code"); scrollToReader(); };
   const focusChat = useCallback(() => {
     chatRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
     chatRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, []);
-
-  // ---- 后端健康检查 + 恢复上次填的 provider（**默认不恢复 api_key**）----
-  useEffect(() => {
-    fetch(healthUrl())
-      .then((response) => setBackendUp(response.ok))
-      .catch(() => setBackendUp(false));
-
+  const changeProvider = (next: ProviderConfig) => {
+    const safe = providerChange(provider, next);
+    if (safe !== next && provider.api_key) setNotice("端点或协议已更换，请填写新来源的密钥。");
+    smokeRevision.current += 1;
+    setSmoke(null);
+    setProvider(safe);
+  };
+  const saveProvider = () => {
     try {
-      migrateStorage(window.localStorage);
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const saved = JSON.parse(raw) as Record<string, unknown>;
-        const text = (value: unknown) => (typeof value === "string" ? value : undefined);
-        // 按字段取、按类型收：存储里还有 remember_key（本地开关），整个对象摊进表单状态
-        // 会让它跟着每个请求发给后端（extra="forbid" → 全部 422）
-        setProvider((current) => ({
-          ...current,
-          protocol:
-            saved.protocol === "anthropic" || saved.protocol === "openai-compatible" ? saved.protocol : current.protocol,
-          base_url: text(saved.base_url) ?? current.base_url,
-          model: text(saved.model) ?? current.model,
-          api_key: saved.remember_key === true ? (text(saved.api_key) ?? "") : "",
-        }));
-        setRememberKey(saved.remember_key === true);
-      }
-    } catch {
-      /* localStorage 里的脏数据不该让页面挂掉 */
+      window.localStorage.setItem(PROVIDER_STORAGE_KEY, JSON.stringify({ ...provider,
+        api_key: rememberKey ? provider.api_key : "", remember_key: rememberKey }));
+      setNotice("模型设置已保存到本机浏览器。");
+    } catch { setError("浏览器无法保存设置，请检查浏览器存储权限。"); }
+  };
+  const changeRememberKey = (remember: boolean) => {
+    setRememberKey(remember);
+    if (!remember) {
+      try {
+        const raw = window.localStorage.getItem(PROVIDER_STORAGE_KEY);
+        if (raw) window.localStorage.setItem(PROVIDER_STORAGE_KEY, JSON.stringify({ ...JSON.parse(raw), api_key: "", remember_key: false }));
+      } catch { setError("无法移除浏览器已保存的密钥，请在浏览器设置中清除站点数据。"); }
     }
-
-    return () => sourceRef.current?.close();
-  }, []);
-
-  useEffect(() => {
-    try {
-      // SSR cannot read browser preferences; restore once after hydration without changing the server markup.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setOutputLanguage(normalizeOutputLanguage(window.localStorage.getItem(OUTPUT_LANGUAGE_STORAGE_KEY)));
-    } catch {
-      setNotice("无法读取浏览器保存的解析语言，当前使用简体中文。");
-    }
-  }, []);
-
-  const saveProvider = useCallback(() => {
-    const payload = { ...provider, api_key: rememberKey ? provider.api_key : "", remember_key: rememberKey };
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-  }, [provider, rememberKey]);
-
+  };
   const changeOutputLanguage = (value: string) => {
     const language = normalizeOutputLanguage(value);
     setOutputLanguage(language);
-    try {
-      window.localStorage.setItem(OUTPUT_LANGUAGE_STORAGE_KEY, language);
-    } catch {
-      setNotice("解析语言已切换，但浏览器无法保存；刷新后会恢复默认语言。");
-    }
+    try { window.localStorage.setItem(OUTPUT_LANGUAGE_STORAGE_KEY, language); }
+    catch { setNotice("语言已切换，但浏览器无法保存这项设置。"); }
   };
-
-  const openStream = useCallback((id: string) => {
-    sourceRef.current?.close();
-    // 只订阅"还没收到过"的部分：这样阶段 B 重开流时不会重放阶段 A 的 run_end
-    const lastSeen = eventsRef.current.reduce((max, event) => Math.max(max, event.id), 0);
-    const source = new EventSource(eventsUrl(id, lastSeen));
-    sourceRef.current = source;
-
-    // 后端发的是具名事件，所以必须逐个类型注册监听（漏一个就静默收不到）
-    for (const type of EVENT_TYPES) {
-      source.addEventListener(type, (event) => {
-        if (sourceRef.current !== source) return;
-        const parsed = JSON.parse((event as MessageEvent).data) as RunEvent;
-        const next = eventsRef.current.some((item) => item.id === parsed.id) ? eventsRef.current : [...eventsRef.current, parsed];
-        eventsRef.current = next;
-        setEvents(next);
-        const chat = chatState(next);
-        if (chat.reply && chat.userId > chatAfterIdRef.current) setChatTurns(chatTurnsFromEvents(next));
-        if (parsed.type === "run_end") {
-          if (chatPendingRef.current && chat.userId <= chatAfterIdRef.current) return;
-          chatPendingRef.current = false;
-          setChatBusy(false);
-          setPhase("done");
-          source.close();
-        }
-      });
-    }
-    // 断线不用管：EventSource 会自动重连并带上 Last-Event-ID，后端只补发缺的那几条
-    source.onerror = () => undefined;
-  }, []);
-
-  const handleSmoke = useCallback(async () => {
-    setSmokeBusy(true);
-    setError(null);
+  const handleSmoke = async () => {
+    const revision = ++smokeRevision.current;
+    setSmokeBusy(true); setError(null);
+    try { const result = await smokeTest(provider); if (revision === smokeRevision.current) setSmoke(result); }
+    catch (caught) { if (revision === smokeRevision.current) setError(String(caught)); }
+    finally { setSmokeBusy(false); }
+  };
+  const requireProvider = () => {
+    if (provider.api_key.trim() && provider.model.trim()) return true;
+    setSetupOpen(true); setError("请填写用于这次请求的模型名和 api_key。回看历史不需要密钥。"); return false;
+  };
+  const handleStart = async () => {
+    if (!file) { setError("请先选择论文 PDF。"); return; }
+    if (!requireProvider()) return;
+    const ticket = ++actionGeneration.current;
+    reset(); clearReader(); setReadOnly(false); setError(null); setNotice(null); setActiveId("");
+    setSelected(new Set()); setChatScope("current"); setReaderTab("paper"); setPendingPhase("uploading");
     try {
-      setSmoke(await smokeTest(provider));
-    } catch (caught) {
-      reportError(caught);
-    } finally {
-      setSmokeBusy(false);
-    }
-  }, [provider, reportError]);
-
-  const handleStart = useCallback(async () => {
-    if (!file) {
-      setError("还没选论文 —— 在「论文 PDF」中选一个文件");
-      return;
-    }
-    if (!provider.api_key || !provider.model) {
-      setError("还没配好模型 —— 在「模型设置」中填 api_key 和模型名（建议先点「运行自检」）");
-      return;
-    }
-    setError(null);
-    setEvents([]);
-    eventsRef.current = [];
-    clearReader();
-    setActiveId("");
-    setReaderOpen(true);
-    setReaderTab("paper");
-    setSelected(new Set());
-    autoSelectedRef.current = false;
-    setPlan(null);
-    setNotice(null);
-    setChatTurns([]);
-    setChatScope("current");
-    setPaper(null);
-    setRunId(null);
-    try {
-      setPhase("uploading");
       const created = await createRun(file, provider, outputLanguage);
-      setRunId(created.run_id);
-      setPaper(created.paper);
-      setSetupOpen(false);
-      openStream(created.run_id);
-      setPhase("recon");
+      if (ticket !== actionGeneration.current) return;
+      window.history.replaceState(null, "", `/?run=${encodeURIComponent(created.run_id)}`);
+      const value = await load(created.run_id);
+      if (!value || ticket !== actionGeneration.current) return;
+      setSetupOpen(false); setPendingPhase("recon");
       await startRecon(created.run_id, provider, outputLanguage);
-    } catch (caught) {
-      setError(String(caught));
-      setPhase("error");
-    }
-  }, [file, provider, outputLanguage, openStream, clearReader]);
-
-  const handleLocate = useCallback(async () => {
-    if (!runId) {
-      setError("还没有可定位的目标：先上传论文跑一次侦察，或者在原文文本里划选一段自己加一个目标");
-      return;
-    }
-    if (selected.size === 0) {
-      setError("还没勾选任何目标 —— 在「创新点目录」中勾上要定位的条目");
-      return;
-    }
-    if (!repoUrl.trim()) {
-      setError(
-        "还没填代码仓库地址 —— 在「代码仓库」中填。" +
-          "本地演示可以填 backend/tests/fixtures/sample_repo 的**绝对路径**" +
-          "（需要后端带 PAPER2CODE_ALLOW_LOCAL_REPO_PATHS=true 启动）",
-      );
-      return;
-    }
-    setError(null);
-    setLocateBusy(true);
-    try {
-      // 重新开流：阶段 A 结束时前端已经把 EventSource 关掉了。
-      // 后端会重放全部历史（按 id 去重），所以不会丢事件也不会重复。
-      openStream(runId);
-      setPhase("locate");
-      await startLocate(runId, provider, repoUrl.trim(), Array.from(selected), outputLanguage);
-    } catch (caught) {
-      setError(String(caught));
-      setPhase("error");
-    } finally {
-      setLocateBusy(false);
-    }
-  }, [runId, repoUrl, provider, selected, outputLanguage, openStream]);
-
-  const planFromEvent = useMemo<Plan | null>(() => {
-    const ready = events.find((event) => event.type === "plan_ready");
-    return (ready?.data.plan as Plan) ?? null;
-  }, [events]);
-
-  // 清单以**服务器为准**：用户自己加的目标只存在于服务端的 plan.json 里，
-  // 光靠事件回放会把它丢掉（刷新页面就会丢）。所以事件到了之后再去拉一次真清单。
-  useEffect(() => {
-    if (!runId) return;
-    let cancelled = false;
-    fetchPlan(runId)
-      .then((payload: { plan: Plan | null }) => {
-        if (cancelled) return;
-        if (payload?.plan) setPlan(payload.plan);
-        else if (planFromEvent) setPlan(planFromEvent);
-      })
-      .catch(() => {
-        if (!cancelled && planFromEvent) setPlan(planFromEvent);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [planFromEvent, runId]);
-
-  // ---- 追问对话 ----
-  useEffect(() => {
-    try {
-      setTimelineOpen(window.localStorage.getItem(TIMELINE_STORAGE_KEY) !== "0");
-    } catch {
-      /* 隐私模式下拿不到 localStorage 也无所谓 */
-    }
-  }, []);
-
-  const toggleTimeline = useCallback(() => {
-    setTimelineOpen((open) => {
-      const next = !open;
-      try {
-        window.localStorage.setItem(TIMELINE_STORAGE_KEY, next ? "1" : "0");
-      } catch {
-        /* 同上 */
-      }
-      return next;
-    });
-  }, []);
-
-  const refreshChat = useCallback(async () => {
-    if (!runId) return;
-    try {
-      const payload = await fetchChat(runId);
-      if (activeRunRef.current !== runId) return;
-      setChatTurns((current) => (payload.turns?.length ?? 0) >= current.length ? (payload.turns ?? []) as ChatTurn[] : current);
-    } catch {
-      /* 拉不到就先用事件里的内容，不打断用户 */
-    }
-  }, [runId]);
-
-  useEffect(() => {
-    if (runId) void refreshChat();
-  }, [runId, refreshChat]);
-
-  // 每落盘一轮回答就重新拉一次：以服务端的对话记录为准（刷新页面也不丢）
-  const chatReplyCount = useMemo(
-    () => events.filter((event) => event.type === "chat_reply").length,
-    [events],
-  );
-  useEffect(() => {
-    if (chatReplyCount > 0) {
-      void refreshChat();
-    }
-  }, [chatReplyCount, refreshChat]);
-
-  /**
-   * 正在流式输出的那一轮回答。
-   *
-   * 关键：**一旦这轮回答已经落盘（chat_reply 出现在 chat_user 之后），就返回空**。
-   * 否则 ChatPanel 会同时渲染"服务端对话记录里的回答"和"事件流里残留的流式文本"——
-   * 用户看到同一段回答出现两次（2026-09-16 用户实测反馈：
-   * "一句疑问 agent 会回复我两次内容"）。后端本身有并发保护（同一 run 同时只允许一个阶段，409），
-   * 所以这纯粹是前端重复渲染。
-   */
-  const chatProgress = useMemo(() => chatState(events), [events]);
-  const chatStreaming = chatProgress.streaming;
-
-  const sendChat = useCallback(
-    async (message: string) => {
-      if (!runId) {
-        setError("请先上传论文并跑一次分析");
-        return;
-      }
-      setError(null);
-      chatPendingRef.current = true;
-      chatAfterIdRef.current = eventsRef.current.reduce((max, event) => Math.max(max, event.id), 0);
-      setChatAfterId(chatAfterIdRef.current);
-      setChatBusy(true);
-      setChatTurns((current) => [...current, { role: "user", text: message, ts: Date.now() }]);
-      try {
-        openStream(runId); // 阶段结束会关流，追问前重新连上
-        await postChat(runId, {
-          provider,
-          message,
-          context_ids: chatContext ? [chatContext.id] : [],
-          output_language: outputLanguage,
-        });
-      } catch (caught) {
-        setError(String(caught));
-        chatPendingRef.current = false;
-        setChatBusy(false);
-        void refreshChat();
-      }
-    },
-    [runId, provider, outputLanguage, chatContext, openStream, refreshChat],
-  );
-
-  const askAbout = (id: string) => {
-    activateInnovation(id);
-    setChatScope("current");
-    focusChat();
+      if (!isCurrent(created.run_id)) return;
+      await refresh(created.run_id); connect(created.run_id);
+    } catch (caught) { if (ticket === actionGeneration.current) setError(String(caught)); }
+    finally { if (ticket === actionGeneration.current) setPendingPhase(null); }
   };
-
-  /** 在原文里划选一段 → 变成一个定位目标 */
-  const addTarget = useCallback(
-    async (quote: string, page: number) => {
-      if (!runId) {
-        setError("请先上传论文并跑一次侦察（或直接上传后即可添加目标）");
-        return;
-      }
-      try {
-        setError(null);
-        const payload = await addPlanItem(runId, { page, quote });
-        setPlan(payload.plan);
-        setSelected((current) => new Set(current).add(payload.added.id));
-        setNotice(
-          `已加入目标「${payload.added.name}」（${payload.added.id}）。可以改名字或线索，然后点「开始定位」。`,
-        );
-      } catch (caught) {
-        setError(String(caught));
-      }
-    },
-    [runId],
-  );
-
-  const renameTarget = useCallback(
-    async (itemId: string, name: string) => {
-      if (!runId) return;
-      try {
-        const payload = await patchPlanItem(runId, itemId, { name });
-        setPlan(payload.plan);
-      } catch (caught) {
-        setError(String(caught));
-      }
-    },
-    [runId],
-  );
-
-  const removeTarget = useCallback(
-    async (itemId: string) => {
-      if (!runId) return;
-      try {
-        const payload = await deletePlanItem(runId, itemId);
-        setPlan(payload.plan);
-        if (activeInnovation?.id === itemId) {
-          setActiveId("");
-          clearReader();
-        }
-        setSelected((current) => {
-          const next = new Set(current);
-          next.delete(itemId);
-          return next;
-        });
-      } catch (caught) {
-        setError(String(caught));
-      }
-    },
-    [runId, activeInnovation, clearReader],
-  );
-
+  const handleLocate = async () => {
+    if (!runId || readOnly || !requireProvider()) return;
+    if (!selected.size || !repoUrl.trim()) { setError("请勾选至少一条目标并填写代码仓库地址。"); return; }
+    setPendingPhase("locate"); setError(null);
+    try {
+      await startLocate(runId, provider, repoUrl.trim(), Array.from(selected), outputLanguage);
+      if (!isCurrent(runId)) return;
+      await refresh(runId); connect(runId);
+    } catch (caught) { if (isCurrent(runId)) setError(String(caught)); }
+    finally { if (isCurrent(runId)) setPendingPhase(null); }
+  };
+  const sendChat = async (message: string) => {
+    if (!runId || !requireProvider()) return;
+    setPendingPhase("chat"); setError(null);
+    try {
+      await postChat(runId, { provider, message, context_ids: chatContext ? [chatContext.id] : [], output_language: outputLanguage });
+      if (!isCurrent(runId)) return;
+      await refresh(runId); connect(runId);
+    } catch (caught) { if (isCurrent(runId)) setError(String(caught)); }
+    finally { if (isCurrent(runId)) setPendingPhase(null); }
+  };
+  const askAbout = (id: string) => { activateInnovation(id); setChatScope("current"); focusChat(); };
+  const addTarget = async (quote: string, page: number) => {
+    if (!runId || readOnly) return;
+    try {
+      const payload = await addPlanItem(runId, { page, quote });
+      if (!isCurrent(runId)) return;
+      updatePlan(runId, payload.plan); setSelected(current => new Set(current).add(payload.added.id));
+      setNotice(`已加入目标「${payload.added.name}」。`);
+    } catch (caught) { if (isCurrent(runId)) setError(String(caught)); }
+  };
+  const renameTarget = async (itemId: string, name: string) => {
+    if (!runId || readOnly) return;
+    try { const payload = await patchPlanItem(runId, itemId, { name }); updatePlan(runId, payload.plan); }
+    catch (caught) { if (isCurrent(runId)) setError(String(caught)); }
+  };
+  const removeTarget = async (itemId: string) => {
+    if (!runId || readOnly) return;
+    try {
+      const payload = await deletePlanItem(runId, itemId);
+      if (!isCurrent(runId)) return;
+      updatePlan(runId, payload.plan); setActiveId(""); clearReader();
+      setSelected(current => new Set([...current].filter(id => id !== itemId)));
+    } catch (caught) { if (isCurrent(runId)) setError(String(caught)); }
+  };
+  const autoSelected = useRef<string | null>(null);
   useEffect(() => {
-    const generated = plan?.innovations.filter((item) => item.source !== "user") ?? [];
-    if (generated.length > 0 && !autoSelectedRef.current) {
-      autoSelectedRef.current = true;
-      setSelected((current) => {
-        const next = new Set(current);
-        for (const item of generated) next.add(item.id);
-        return next;
-      });
+    if (!readOnly && runId && plan?.innovations.length && autoSelected.current !== runId) {
+      autoSelected.current = runId;
+      queueMicrotask(() => setSelected(new Set(plan.innovations.map(item => item.id))));
     }
-  }, [plan]);
-
-  const verification = useMemo<VerificationSummary | null>(() => {
-    const done = [...events].reverse().find((event) => event.type === "verification_done");
-    return (done?.data.summary as VerificationSummary) ?? null;
-  }, [events]);
-  const missingIds = useMemo<string[]>(() => {
-    const done = [...events].reverse().find((event) => event.type === "verification_done");
-    return (done?.data.missing_ids as string[]) ?? [];
-  }, [events]);
-  const filesTotal = useMemo<number | null>(() => {
-    const ready = [...events].reverse().find((event) => event.type === "repo_ready");
-    return (ready?.data.repo?.files_total as number) ?? null;
-  }, [events]);
-  const commitSha = useMemo<string | null>(() => {
-    const ready = [...events].reverse().find((event) => event.type === "repo_ready");
-    return (ready?.data.repo?.commit_sha as string) ?? null;
-  }, [events]);
-
-  const runEnd = useMemo(() => [...events].reverse().find((event) => event.type === "run_end")?.data, [events]);
-  const paperReady = useMemo(
-    () => events.find((event) => event.type === "paper_ready")?.data.paper as PaperMeta | undefined,
-    [events],
-  );
-
-  const toggle = (id: string) =>
-    setSelected((current) => {
-      const next = new Set(current);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-
-  const toggleAll = () =>
-    setSelected((current) =>
-      plan && plan.innovations.every((item) => current.has(item.id))
-        ? new Set()
-        : new Set(plan?.innovations.map((item) => item.id) ?? []),
-    );
-
-  const busy = phase === "uploading" || phase === "recon" || phase === "locate";
-
-  // "点了没反应"的根治办法：把还缺什么直接写在按钮旁边
-  const reconBlockers = [
-    !file && "先选一篇 PDF",
-    !provider.api_key && "在「模型设置」中填 api_key",
-    !provider.model && "在「模型设置」中填模型名",
-  ].filter(Boolean) as string[];
-
-  const locateBlockers = [
-    !runId && "先上传论文并跑一次侦察（或先自己加一个目标）",
-    selected.size === 0 && "先勾选至少一条要定位的目标",
-    !repoUrl.trim() && "在「代码仓库」中填代码仓库地址",
-    !provider.api_key && "在「模型设置」中填 api_key",
-  ].filter(Boolean) as string[];
-
-  const phaseLabel = { idle: "准备论文与仓库", uploading: "正在上传论文", recon: "正在侦察论文", locate: "正在定位代码", done: "本轮已结束", error: "运行出错" }[phase];
+  }, [plan, readOnly, runId]);
+  const toggle = (id: string) => setSelected(current => {
+    const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next;
+  });
+  const toggleAll = () => setSelected(current => plan?.innovations.every(item => current.has(item.id)) ? new Set() : new Set(plan?.innovations.map(item => item.id)));
+  const toggleTimeline = () => setTimelineOpen(open => {
+    try { window.localStorage.setItem(TIMELINE_STORAGE_KEY, open ? "0" : "1"); }
+    catch { setNotice("浏览器无法保存轨迹显示设置。"); }
+    return !open;
+  });
+  const reconBlockers = [!file && "先选一篇 PDF", !provider.api_key && "填写 api_key", !provider.model && "填写模型名"].filter(Boolean);
+  const locateBlockers = [!runId && "先上传论文", !selected.size && "勾选目标", !repoUrl.trim() && "填写仓库地址", !provider.api_key && "填写 api_key"].filter(Boolean);
+  const phaseLabel = session.loading ? "正在载入历史" : chatBusy ? "正在追问" : ({ idle: "准备论文与仓库", uploading: "正在上传论文", recon: "正在侦察论文", locate: "正在定位代码", done: "本轮已结束" }[phase] ?? phase);
+  const visibleError = error || session.error;
 
   return (
     <main className="mx-auto w-full max-w-[1560px] flex-1 px-4 py-4 sm:px-6">
@@ -575,7 +247,11 @@ export default function Home() {
           <h1 className="text-xl font-semibold tracking-tight">Paper2code <span className="ml-2 text-xs font-normal text-neutral-500">论文与代码，一起读懂</span></h1>
           <p className="mt-1 text-xs text-neutral-500">从核心创新点出发，阅读解释，回到原文与实现。</p>
         </div>
-        <span className="text-xs text-neutral-500" title={`后端 ${API_BASE}`}>{backendUp === null ? "连接检查中…" : backendUp ? "● 服务已连接" : "服务未连接，请启动后端"}</span>
+        <nav aria-label="主导航" className="flex flex-wrap items-center gap-4 text-sm">
+          <Link href="/history" className="text-teal-800 underline-offset-4 hover:underline dark:text-teal-300">历史记录</Link>
+          {readOnly && <Link href="/" onClick={() => { reset(); setReadOnly(false); setSetupOpen(true); clearReader(); setSelected(new Set()); setActiveId(""); }} className="text-teal-800 underline-offset-4 hover:underline dark:text-teal-300">新建解读</Link>}
+          <span className="text-xs text-neutral-500" title={`后端 ${API_BASE}`}>{backendUp === null ? "连接检查中…" : backendUp ? "服务已连接" : "服务未连接，请启动后端"}</span>
+        </nav>
       </header>
 
       <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -587,8 +263,8 @@ export default function Home() {
         <p id="output-language-hint" className="text-sm text-neutral-600 dark:text-neutral-400">用于新生成的创新点、代码讲解和追问；已有结果与引用原文保持不变。</p>
       </div>
 
-      {error && <div role="alert" className="sticky top-2 z-50 mb-4 flex items-start gap-2 rounded-lg border border-red-300 bg-red-50 p-3 text-sm shadow-lg dark:border-red-900 dark:bg-red-950 dark:text-red-100">
-        <span className="min-w-0 flex-1 break-words">{error}</span>
+      {visibleError && <div role="alert" className="sticky top-2 z-50 mb-4 flex items-start gap-2 rounded-lg border border-red-300 bg-red-50 p-3 text-sm shadow-lg dark:border-red-900 dark:bg-red-950 dark:text-red-100">
+        <span className="min-w-0 flex-1 break-words">{visibleError}</span>
         <button type="button" onClick={() => setError(null)} className="shrink-0 text-xs underline">关闭</button>
       </div>}
       {notice && <div role="status" className="sticky top-2 z-40 mb-4 flex items-start gap-2 rounded-lg border border-blue-300 bg-blue-50 p-3 text-sm dark:border-blue-900 dark:bg-blue-950 dark:text-blue-100">
@@ -596,8 +272,16 @@ export default function Home() {
         <button type="button" onClick={() => setNotice(null)} className="shrink-0 text-xs underline">知道了</button>
       </div>}
 
+      {readOnly && snapshot && <section aria-label="历史解读信息" className="mb-4 border-y border-neutral-200 py-4 dark:border-neutral-800">
+        <h2 className="break-words text-lg font-semibold">{snapshot.history.title}</h2>
+        <p className="mt-2 text-sm text-neutral-600 dark:text-neutral-400">{HISTORY_STATUS[snapshot.history.analysis_status] || snapshot.history.analysis_status} · 原模型：{snapshot.history.original_provider?.model || "未记录"}。已有创新点与结论保留，后续追问使用下方设置的模型。</p>
+        {operation?.status === "interrupted" && <p role="status" className="mt-2 text-sm text-amber-800 dark:text-amber-300">{operation.reason}</p>}
+      </section>}
+      {snapshot?.warnings.map(warning => <p role="status" key={warning} className="mb-3 break-words text-sm text-amber-800 dark:text-amber-300">{warning}</p>)}
+      {session.loading && <p role="status" className="mb-4 text-sm">正在载入已保存的解读…</p>}
+
       <div className="run-status sticky top-0 z-30 mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-neutral-200 bg-white/95 px-4 py-3 backdrop-blur dark:border-neutral-800 dark:bg-neutral-950/95">
-        <span className={`h-2 w-2 rounded-full ${busy ? "animate-pulse bg-teal-500" : phase === "error" ? "bg-red-500" : "bg-neutral-400"}`} />
+        <span className={`h-2 w-2 rounded-full ${busy ? "animate-pulse bg-teal-500" : visibleError ? "bg-red-500" : "bg-neutral-400"}`} />
         <span role="status" className="text-sm font-medium">{phaseLabel}</span>
         {plan && <span className="text-xs text-neutral-500">{plan.innovations.length} 条创新点 · {findings.length} 条结论</span>}
         {runId && <nav aria-label="阅读快捷入口" className="flex gap-3 text-xs text-teal-700 dark:text-teal-300"><button type="button" onClick={scrollToReader}>原文与代码</button><button type="button" onClick={focusChat}>追问</button></nav>}
@@ -608,17 +292,17 @@ export default function Home() {
         <div className="min-w-0 flex-1 space-y-4">
           <section className="setup-panel rounded-xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950">
             <button type="button" onClick={() => setSetupOpen(!setupOpen)} aria-expanded={setupOpen} aria-controls="analysis-setup" className="flex w-full flex-wrap items-center gap-2 px-4 py-3 text-left">
-              <span className="text-sm font-semibold">分析准备</span>
+              <span className="text-sm font-semibold">{readOnly ? "后续追问的模型" : "分析准备"}</span>
               <span className="min-w-0 flex-1 truncate text-xs text-neutral-500">{paper ? `${paper.filename} · ${paper.page_count} 页` : "选择模型、上传论文"}{provider.model ? ` · ${provider.model}` : ""}</span>
-              <span className="text-xs text-teal-700 dark:text-teal-300">{setupOpen ? "收起 ↑" : "修改设置 / 更换论文 ↓"}</span>
+              <span className="text-xs text-teal-700 dark:text-teal-300">{setupOpen ? "收起 ↑" : readOnly ? "更换来源 / 模型 ↓" : "修改设置 / 更换论文 ↓"}</span>
             </button>
             <div id="analysis-setup" hidden={!setupOpen} className="border-t border-neutral-200 p-4 dark:border-neutral-800">
               <div className="grid items-start gap-5 md:grid-cols-2">
                 <div className="min-w-0">
-                  <ProviderForm value={provider} onChange={setProvider} smoke={smoke} smokeBusy={smokeBusy} onSmoke={handleSmoke} onSave={saveProvider} />
-                  <label className="mt-3 flex items-start gap-2 text-xs text-neutral-500"><input type="checkbox" checked={rememberKey} onChange={(event) => setRememberKey(event.target.checked)} />把 api_key 存在这个浏览器里（默认不存；存了就等于交给 localStorage）</label>
+                  <ProviderForm value={provider} onChange={changeProvider} smoke={smoke} smokeBusy={smokeBusy} onSmoke={handleSmoke} onSave={saveProvider} />
+                  <label className="mt-3 flex items-start gap-2 text-xs text-neutral-500"><input type="checkbox" checked={rememberKey} onChange={(event) => changeRememberKey(event.target.checked)} />把 api_key 存在这个浏览器里（默认不存；存了就等于交给 localStorage）</label>
                 </div>
-                <section className="min-w-0">
+                {readOnly ? <p className="text-sm leading-7 text-neutral-600 dark:text-neutral-400">回看历史无需配置模型。要继续追问时，选择可用的来源、填写模型名和密钥即可；新模型会读取已有解读和对话。更换端点或协议后需要重新填写密钥。</p> : <section className="min-w-0">
                   <h2 className="mb-3 text-sm font-semibold">论文 PDF</h2>
                   <input type="file" aria-label="论文 PDF" accept="application/pdf" onChange={(event) => setFile(event.target.files?.[0] ?? null)} className="block w-full text-xs file:mr-3 file:rounded file:border-0 file:bg-neutral-100 file:px-3 file:py-2 dark:file:bg-neutral-800" />
                   {paper && <p className="mt-2 break-words text-xs text-neutral-500">{paper.filename} · {paper.page_count} 页</p>}
@@ -626,19 +310,21 @@ export default function Home() {
                   {reconBlockers.length > 0 && <p className="mt-2 text-xs text-amber-700 dark:text-amber-400">还差：{reconBlockers.join("、")}</p>}
                   <p className="mt-3 text-xs leading-6 text-neutral-500">先梳理论文的核心创新点，再选择要定位的实现。每条论文引用都会核对页码与原文。</p>
                   {paperReady && !runEnd && <p className="mt-2 text-xs text-neutral-500">论文已解析完成</p>}
-                </section>
+                </section>}
               </div>
             </div>
           </section>
 
-          <section className="rounded-xl border border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-950">
+          {!readOnly && <section className="rounded-xl border border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-950">
             <label htmlFor="repository" className="mb-2 block text-sm font-semibold">代码仓库</label>
             <div className="flex flex-col gap-2 sm:flex-row">
               <input id="repository" value={repoUrl} onChange={(event) => setRepoUrl(event.target.value)} placeholder="https://github.com/owner/repo" className="min-w-0 flex-1 rounded-lg border border-neutral-300 bg-transparent px-3 py-2 font-mono text-xs dark:border-neutral-700" />
               <button type="button" onClick={handleLocate} disabled={busy || locateBusy} className="primary-button shrink-0">{phase === "locate" ? "正在定位…" : `开始定位选中的 ${selected.size} 条`}</button>
             </div>
             {locateBlockers.length > 0 && <p className="mt-2 text-xs text-amber-700 dark:text-amber-400">还差：{locateBlockers.join("、")}</p>}
-          </section>
+          </section>}
+
+          {snapshot?.has_older_events && <button type="button" onClick={() => void session.older()} className="min-h-10 text-sm text-teal-800 underline dark:text-teal-300">加载更早的行动轨迹</button>}
 
           <div id="run-timeline" className="xl:hidden" hidden={!timelineOpen}><Timeline events={events} variant="inline" /></div>
 
@@ -646,38 +332,38 @@ export default function Home() {
             <header className="flex flex-wrap items-center gap-3 border-b border-neutral-200 px-5 py-4 dark:border-neutral-800">
               <h2 className="text-sm font-semibold">核心创新点 {plan && <span className="ml-1 font-normal text-neutral-500">{plan.innovations.length} 条</span>}</h2>
               <div className="ml-auto flex gap-4 text-xs text-teal-700 dark:text-teal-300">
-                {runId && <button type="button" onClick={() => openPaper(1, "")}>浏览论文 / 划选目标 ↗</button>}
+                {runId && <button type="button" onClick={() => openPaper(1, "")}>{readOnly ? "浏览历史论文 ↗" : "浏览论文 / 划选目标 ↗"}</button>}
                 {runId && <button type="button" onClick={focusChat}>追问 ↗</button>}
               </div>
             </header>
             {plan ? <>
               <details className="paper-summary border-b border-neutral-200 px-5 py-3 text-sm dark:border-neutral-800">
                 <summary className="text-xs text-neutral-500">论文摘要与覆盖说明</summary>
-                <p className="mt-3 whitespace-pre-wrap leading-7">{plan.paper_summary}</p>
-                {plan.coverage_note && <p className="mt-2 text-xs text-neutral-500">覆盖说明：{plan.coverage_note}</p>}
+                <Markdown text={plan.paper_summary} className="mt-3 leading-7" />
+                {plan.coverage_note && <p className="mt-2 text-xs text-neutral-500">覆盖说明：<Markdown inline text={plan.coverage_note} /></p>}
               </details>
               <div className="innovation-layout">
-                <PlanList key={runId} plan={plan} selected={selected} activeId={activeInnovation?.id ?? ""} findings={findings} missingIds={missingIds} busy={busy} onActivate={activateInnovation} onToggle={toggle} onSelectAll={toggleAll} />
+                <PlanList key={runId} readOnly={readOnly} plan={plan} selected={selected} activeId={activeInnovation?.id ?? ""} findings={findings} missingIds={missingIds} busy={busy} onActivate={activateInnovation} onToggle={toggle} onSelectAll={toggleAll} />
                 {activeInnovation && <div id="innovation-detail" role="tabpanel" aria-labelledby={`innovation-tab-${activeInnovation.id}`} tabIndex={0} className="innovation-detail">
-                  <PlanDetail key={activeInnovation.id} active={activeInnovation} hasFinding={Boolean(activeFinding)} onRename={renameTarget} onDelete={removeTarget} onOpenPaper={openPaper} />
-                  <ComparePanel key={`finding-${activeInnovation.id}`} finding={activeFinding} missing={missingIds.includes(activeInnovation.id)} busy={phase === "locate"} selected={selected.has(activeInnovation.id)} onOpenPaper={openPaper} onOpenCode={openCode} onAsk={askAbout} />
+                  <PlanDetail key={`${runId}-${activeInnovation.id}`} readOnly={readOnly} active={activeInnovation} hasFinding={Boolean(activeFinding)} onRename={renameTarget} onDelete={removeTarget} onOpenPaper={openPaper} />
+                  <ComparePanel readOnly={readOnly} key={`finding-${activeInnovation.id}`} finding={activeFinding} missing={missingIds.includes(activeInnovation.id)} busy={phase === "locate"} selected={selected.has(activeInnovation.id)} onOpenPaper={openPaper} onOpenCode={openCode} onAsk={askAbout} />
                 </div>}
               </div>
-            </> : <p className="px-5 py-8 text-sm text-neutral-500">{busy ? "正在阅读论文，创新点清单将在这里出现。" : "上传论文并开始侦察，在这里逐条阅读创新点及对应实现。"}</p>}
+            </> : <p className="px-5 py-8 text-sm text-neutral-500">{busy ? "正在阅读论文，创新点清单将在这里出现。" : readOnly ? "这份历史尚未保存创新点清单，仍可浏览论文或继续追问。" : "上传论文并开始侦察，在这里逐条阅读创新点及对应实现。"}</p>}
           </section>
 
           <section ref={readerRef} className="scroll-mt-24" aria-label="对照阅读器">
             <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-              <h2 className="text-sm font-semibold">对照阅读器 <span className="ml-2 text-xs font-normal text-neutral-500">{activeInnovation ? `当前：${activeInnovation.name}` : "原文与代码"}</span></h2>
+              <h2 className="text-sm font-semibold">对照阅读器 <span className="ml-2 text-xs font-normal text-neutral-500">{activeInnovation ? <>当前：<Markdown inline text={activeInnovation.name} /></> : "原文与代码"}</span></h2>
               {runId && <button type="button" onClick={() => setReaderOpen(!readerOpen)} aria-expanded={readerOpen} aria-controls="reader-content" className="min-h-9 shrink-0 rounded px-2 text-xs text-teal-700 hover:bg-teal-50 dark:text-teal-300 dark:hover:bg-teal-950">{readerOpen ? "收起阅读器 ↑" : "展开阅读器 ↓"}</button>}
             </div>
             <div id="reader-content" hidden={!readerOpen}>
-              {runId ? <Reader left={paperPane} right={codePane} walkthrough={activeFinding?.explanation.code_walkthrough} onOpenCode={openCode} activeTab={readerTab} onTabChange={setReaderTab} codeEmpty={phase === "locate" ? "正在定位代码，找到实现后会自动显示。" : activeFinding ? "这条创新点暂无可展示的代码引用。" : "开始定位后，这里会自动显示当前创新点的代码。"} pdfUrl={pdfUrl(runId)} pageImageUrl={(page: number) => paperPageImageUrl(runId, page)} onGoToPage={(page) => selectPaper({ page, quote: "" })} onSelectTarget={addTarget} /> : <p className="text-xs text-neutral-500">上传论文后，在这里对照原文与实现。</p>}
+              {runId ? <Reader left={paperPane} right={codePane} walkthrough={activeFinding?.explanation?.code_walkthrough} onOpenCode={openCode} activeTab={readerTab} onTabChange={setReaderTab} codeEmpty={phase === "locate" ? "正在定位代码，找到实现后会自动显示。" : activeFinding ? "这条创新点暂无可展示的代码引用。" : readOnly ? "历史中暂无代码引用，可继续追问已有内容。" : "开始定位后，这里会自动显示当前创新点的代码。"} pdfUrl={pdfUrl(runId)} pageImageUrl={(page: number) => paperPageImageUrl(runId, page)} onGoToPage={(page) => selectPaper({ page, quote: "" })} onSelectTarget={readOnly ? undefined : addTarget} /> : <p className="text-xs text-neutral-500">上传论文后，在这里对照原文与实现。</p>}
             </div>
           </section>
 
           <div ref={chatRef} hidden={!runId} className="scroll-mt-24">
-            <ChatPanel key={runId} turns={chatTurns} streaming={chatStreaming} busy={chatBusy} progress={chatProgress.userId > chatAfterId ? chatProgress.status : "正在发送问题"} stoppedReason={chatProgress.reason} context={chatContext} onClearContext={() => setChatScope(chatScope === "current" ? "all" : "current")} onSend={sendChat} disabled={!runId || busy} onOpenCitation={(path, start, end) => openCode(path, start, end, "来自追问对话")} />
+            <ChatPanel key={runId} turns={chatTurns} streaming={chatStreaming} busy={chatBusy} progress={pendingPhase === "chat" ? "正在发送问题" : chatProgress.status} stoppedReason={chatProgress.reason} context={chatContext} onClearContext={() => setChatScope(chatScope === "current" ? "all" : "current")} onSend={sendChat} disabled={!runId || busy || snapshot?.can_chat === false} onOpenCitation={(path, start, end) => openCode(path, start, end, "来自追问对话")} />
           </div>
 
           {runEnd && <details className="rounded-lg border border-neutral-200 dark:border-neutral-800">

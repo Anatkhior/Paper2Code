@@ -10,7 +10,7 @@ type CodeTarget = { path: string; start: number; end: number; why: string };
 type Override<T> = { owner: string; target: T } | null;
 
 /** 自动引用和手动引用共用一个请求路径；结果只属于发起请求时的 run / 创新点 / 引用 / 仓库版本。 */
-export function useReader(runId: string | null, active: Innovation | undefined, finding: Finding | undefined, repoVersion: number) {
+export function useReader(runId: string | null, active: Innovation | undefined, finding: Finding | undefined, repoVersion: string | number) {
   const owner = JSON.stringify([runId, active?.id]);
   const [paperOverride, setPaperOverride] = useState<Override<PaperTarget>>(null);
   const [codeOverride, setCodeOverride] = useState<Override<CodeTarget>>(null);

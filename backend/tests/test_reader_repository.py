@@ -50,8 +50,10 @@ class ReaderRepositoryTest(unittest.IsolatedAsyncioTestCase):
                             self.assertLessEqual(len(window["lines"]), main.MAX_VIEW_LINES)
                             self.assertEqual(window["focus"], {"start": focus_start, "end": focus_end})
 
-                    # 最终产物可能尚未写入，也可能属于上次定位；当前 git 版本只读事件。
-                    store.write_json(directory / "artifact.json", {"run": {"repo": {"commit_sha": "obsolete"}}})
+                    # 历史产物钉住旧 commit；工作区或新的 repo_ready 不能更改其证据。
+                    store.write_json(directory / "artifact.json", {"run": {"repo": {"commit_sha": commit}}})
+                    (directory / "repo" / "loralib" / "layers.py").write_text("modified working copy\n")
+                    await run.bus.emit("repo_ready", repo={"commit_sha": "obsolete", "url": "https://github.com/example/repo"})
                     main.RUNS.pop(run_id)
                     replayed = await client.get(endpoint, params=params)
                     self.assertEqual(replayed.status_code, 200, replayed.text)
@@ -60,8 +62,12 @@ class ReaderRepositoryTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNotNone(repo)
                     self.assertEqual(repo.commit_sha, commit)
                     self.assertTrue(any(tool.name == "read_file" for tool in tools))
+                    self.assertNotIn("modified working copy", repo.read_file("loralib/layers.py")["numbered"])
+                    self.assertEqual(repo.search("modified working copy")["hits"], [])
+                    self.assertTrue(repo.search("LoRALayer")["hits"])
 
-                    # 新一轮克隆覆盖目录时不能回读上轮的 repo_ready / artifact。
+                    # 没有历史产物时，正在克隆的仓库仍不得冒充已就绪。
+                    (directory / "artifact.json").unlink()
                     await main._registry(run_id).bus.emit("repo_cloning", url=str(source))
                     self.assertEqual((await client.get(endpoint, params=params)).status_code, 409)
             finally:

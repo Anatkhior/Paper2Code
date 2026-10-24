@@ -1,6 +1,7 @@
 "use client";
 
 import type { RunEvent, VerificationSummary } from "@/lib/types";
+import Markdown from "@/components/Markdown";
 
 interface Props {
   events: RunEvent[];
@@ -115,7 +116,7 @@ export default function CoverageCard({ events, verification, missingIds, filesTo
 
       {runEnd.coverage_note && (
         <p className="mt-2 text-[11px] text-neutral-500">
-          Agent 自述的覆盖情况：{runEnd.coverage_note}
+          Agent 自述的覆盖情况：<Markdown inline text={runEnd.coverage_note} />
         </p>
       )}
     </section>

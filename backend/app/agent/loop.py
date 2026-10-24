@@ -372,10 +372,11 @@ async def run_agent(
                 break
 
     except asyncio.CancelledError:
-        status = "cancelled"
-        stopped_reason = "用户取消"
-        summary = {"status": status, "stopped_reason": stopped_reason, "usage": budget.snapshot()}
-        if require_final_answer and finalize is not None:
+        status = bus.cancel_status
+        stopped_reason = bus.cancel_reason
+        summary = {"status": status, "stopped_reason": stopped_reason, "usage": budget.snapshot(),
+                   "plan": ctx.state.get("plan"), "findings": ctx.state.get("findings"), "partial": True}
+        if finalize is not None:
             summary.update(final_text=turn_text or last_text, tools_used=tools_used, partial=True)
             try:
                 summary.update(await finalize(summary))
@@ -442,6 +443,7 @@ async def run_agent(
         except Exception as exc:  # noqa: BLE001
             await bus.emit("error", kind=f"finalize:{type(exc).__name__}", message=str(exc)[:500])
             summary.setdefault("finalize_error", str(exc)[:300])
+            summary["status"] = "failed"
 
     # 注意：这里**不关总线**。一个 run 的事件总线贯穿它的所有阶段，
     # 关了的话第二阶段的事件就发不出来了。

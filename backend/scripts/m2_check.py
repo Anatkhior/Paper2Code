@@ -596,11 +596,12 @@ async def section_a(check: Checker) -> dict[str, Any]:
     )
     await expect_error(check, lambda: repo.read_file("no/such/file.py"), "不存在的文件被拒绝", "文件不存在")
 
-    # 二进制与超大文件：用一个独立的临时目录测（不需要 git）
+    # 工具与核验统一读取冻结的 git 对象；测试材料也必须有真实 commit。
     binary_dir = work / "binary"
     binary_dir.mkdir(exist_ok=True)
     (binary_dir / "weights.pt").write_bytes(b"\x00\x01\x02binary")
-    binary_repo = RepoSource(binary_dir, "deadbeef")
+    commit_all(binary_dir)
+    binary_repo = RepoSource(binary_dir, "HEAD")
     await expect_error(check, lambda: binary_repo.read_file("weights.pt"), "二进制文件被拒绝", "二进制")
 
     # ---- 符号链接（2026-09-26 审查修复）：仓库内容是不可信输入，链接一律不跟随 ----
@@ -616,7 +617,8 @@ async def section_a(check: Checker) -> dict[str, Any]:
     (raw_links / "abs.py").symlink_to(outside_dir / "secret.txt")
     (raw_links / "inner.py").symlink_to("pkg/real.py")
     (raw_links / "linkdir").symlink_to(outside_dir, target_is_directory=True)
-    linked = RepoSource(raw_links, "deadbeef")
+    commit_all(raw_links)
+    linked = RepoSource(raw_links, "HEAD")
     canary = linked.search("SYMLINK_CANARY")
     check(
         not canary["hits"] and canary["complete"] is True,
@@ -662,7 +664,8 @@ async def section_a(check: Checker) -> dict[str, Any]:
         (many_dir / "a_data" / f"{index:05d}.txt").write_text("x\n", encoding="utf-8")
     (many_dir / "zz_src").mkdir(exist_ok=True)
     (many_dir / "zz_src" / "impl.py").write_text("class LoRALayer:\n    pass\n", encoding="utf-8")
-    many = RepoSource(many_dir, "deadbeef")
+    commit_all(many_dir)
+    many = RepoSource(many_dir, "HEAD")
     over = many.search("LoRALayer")
     check(
         over["complete"] is False and "截断" in over["note"],

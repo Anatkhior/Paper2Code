@@ -96,7 +96,6 @@ export default function ProviderForm({ value, onChange, smoke, smokeBusy, onSmok
         <button
           type="button"
           onClick={onSave}
-          disabled={!value.api_key || !value.model}
           className="rounded border border-neutral-300 px-3 py-1.5 text-xs disabled:opacity-40 dark:border-neutral-700"
         >
           存到本机浏览器

@@ -99,6 +99,18 @@ PAPER2CODE_EVAL_MODEL=deepseek-chat \
 
 页面顶部可选择**解析语言**（默认简体中文，也可选 English），浏览器会记住选择。设置影响后续侦察、代码逐段讲解与追问，不自动翻译已有结果；论文引文、代码标识符和引用路径保留原文。自动 PDF 高亮只定位同一次引用，不把不同栏或重复出现的片段拼起来；匹配不全时按实际显示的字符比例报告覆盖率。
 
+### 历史解读与换模型续问
+
+右上角的**历史记录**进入本机历史列表，可按论文标题或文件名搜索、分页查看。上传后的解读自动保存，包括部分完成、失败和中断的记录；刷新页面或重启项目后，可用 `/?run=<run_id>` 重新打开。加载历史只读取本机材料，不需要原供应商、密钥或模型自检，也不会自动重跑任务。
+
+历史页面保留创新点、代码解释、PDF 引用和完整对话。在**后续追问的模型**中更换来源、协议、模型和解析语言后，新模型会读取已有解读与近期对话，也可通过只读工具查阅更早的消息；旧结论保持不变，新回答追加到同一份记录并标注模型来源。切换端点或协议会清空旧密钥，任何模型配置修改都会撤销旧自检结果。密钥仍只在明确勾选后保存到浏览器，不写进历史。
+
+本次历史模式支持回看和续问，不提供重新侦察、追加定位、编辑旧创新点或跨机器导入导出。关闭网页后，已提交的后台任务继续运行；后端进程中断后保留已保存的进展并显示中断状态，不自动重发模型请求。论文或仓库丢失时显示具体提示，仍可阅读已经保存的解读；损坏文件不会自动覆盖或伪装成成功。
+
+数据位于 `PAPER2CODE_DATA_DIR`（默认 `backend/data`），继续使用每次运行的 PDF、plan、artifact、chat、events 与 repo 文件；新增 `history.json` 保存轻量索引和操作状态。旧记录在首次读取时生成索引。`backend/scripts/dev_services.sh clean` 现在仅清理可再生的 PDF 缓存，保留全部历史及所需仓库。代码阅读与追问工具统一读取历史绑定的 commit；浅克隆中缺失的 Git 对象仍可能需要访问原仓库，历史保存不是完整离线仓库归档。
+
+离线回归：`cd backend && timeout 60 .venv/bin/python -m unittest tests.test_history tests.test_reader_repository`；前端执行 `pnpm test`，启动本地假端点与测试服务后执行 `pnpm test:browser`。这些测试不调用付费模型。
+
 ## 环境要求
 
 - **Python 3.11+**（必须。`litellm` 用了 3.11 才有的 `typing.NotRequired`，3.10 会直接 ImportError）
@@ -148,6 +160,8 @@ pnpm dev            # http://localhost:3000
 ```
 
 前端默认连 `http://127.0.0.1:8000`，要改就复制 `.env.local.example` 成 `.env.local`。
+
+AI 讲解与追问使用 KaTeX 渲染数学公式：支持 `\(...\)`、`\[...\]`、`$...$`、`$$...$$`，历史记录也会自动渲染。代码示例保持原文；流式公式在分隔符闭合后渲染，语法错误或不支持的命令保留可见错误，不会中断其余回答。长公式可横向滚动，字体由项目本地提供。渲染器不执行模型输出的 HTML，也不启用 KaTeX 的受信任 HTML/外部资源命令。
 
 ### 零成本试用（推荐第一次这样跑）
 
@@ -206,6 +220,9 @@ curl -s http://127.0.0.1:8000/api/provider/smoke-test \
 | GET | `/api/health` | 健康检查 + 当前预算上限 |
 | POST | `/api/provider/smoke-test` | 启动自检（两轮工具调用，判定模型能不能用） |
 | POST | `/api/runs` | multipart 上传 PDF + provider 配置，返回 `run_id` |
+| GET | `/api/runs?q=&offset=0&limit=20` | 本机历史列表、标题/文件名搜索与分页 |
+| GET | `/api/runs/{id}/snapshot` | 一致的历史快照、资源可用性与事件游标 |
+| GET | `/api/runs/{id}/trace?before=<event_id>` | 分页读取更早的行动轨迹 |
 | POST | `/api/runs/{id}/recon` | 启动阶段 A（侦察），产出创新点清单 |
 | POST | `/api/runs/{id}/locate` | 阶段 B：对勾选的创新点做代码定位 + 引用核验 |
 | GET/POST/PATCH/DELETE | `/api/runs/{id}/plan/items…` | 用户自己指定/编辑定位目标（在原文里划选） |

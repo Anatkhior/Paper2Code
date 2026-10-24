@@ -10,7 +10,7 @@
 #   ./scripts/dev_services.sh restart   # 重启全部
 #   ./scripts/dev_services.sh status    # 看谁在跑
 #   ./scripts/dev_services.sh logs mock # 看日志
-#   ./scripts/dev_services.sh clean [N] # 清理旧 run 目录（默认保留最近 10 个）
+#   ./scripts/dev_services.sh clean     # 仅清理 PDF 缓存，保留全部历史
 set -u
 
 BACKEND_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -152,25 +152,8 @@ case "${1:-status}" in
     status_one 3000 "前端" "http://127.0.0.1:3000/"
     ;;
   clean)
-    # 清理旧的 run 目录。克隆/事件/产物都是可再生的派生数据（克隆会按需重建，
-    # 且 data/repo-cache/ 缓存不在此列），只有 meta/plan/artifact 是分析记录——
-    # 所以默认保留最近 10 个 run，更老的才删。
-    # 用法: ./scripts/dev_services.sh clean [保留个数]
-    keep=${2:-10}
-    data_dir="$BACKEND_DIR/data"
-    if [ ! -d "$data_dir" ]; then
-      echo "  data/ 不存在，没东西可清"
-      exit 0
-    fi
-    removed=0
-    # repo-cache 是克隆缓存（正向收益），明确排除；按修改时间 newest-first 排序
-    while IFS= read -r dir; do
-      echo "  删除 $(basename "$dir")"
-      rm -rf "$dir"
-      removed=$((removed + 1))
-    done < <(find "$data_dir" -mindepth 1 -maxdepth 1 -type d ! -name "repo-cache" -print0 \
-      | xargs -0 -r stat -c "%Y	%n" | sort -rn | tail -n +$((keep + 1)) | cut -f2-)
-    echo "  已删除 $removed 个旧 run 目录（保留最近 $keep 个）；克隆缓存 repo-cache 未动。"
+    cd "$BACKEND_DIR" || exit 1
+    "$PY" -m scripts.clean_cache
     ;;
 
   logs)
@@ -178,7 +161,7 @@ case "${1:-status}" in
     tail -n 40 "$LOG_DIR/$name.log"
     ;;
   *)
-    echo "用法：$0 {start|stop|restart|status|clean [N]|logs [backend|mock|frontend]}"
+    echo "用法：$0 {start|stop|restart|status|clean|logs [backend|mock|frontend]}"
     exit 1
     ;;
 esac

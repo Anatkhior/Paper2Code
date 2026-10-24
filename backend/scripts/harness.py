@@ -155,6 +155,8 @@ async def collect_sse(
                         if not line.startswith("data:"):
                             continue
                         event = json.loads(line[5:].strip())
+                        if event.get("type") == "stream_idle":
+                            continue  # Transport control, not a persisted run event.
                         if event["id"] <= since_id:
                             continue  # 历史事件：不算数，也不能用来判断"结束了"
                         events.append(event)

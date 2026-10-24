@@ -13,6 +13,9 @@ export interface ChatCitation {
 }
 
 export interface ChatTurn {
+  provider?: import("@/lib/types").ProviderSummary;
+  operation_id?: string;
+  output_language?: string;
   role: "user" | "assistant";
   text: string;
   ts?: number;
@@ -47,6 +50,7 @@ const TOOL_LABELS: Record<string, string> = {
   search_code: "搜代码",
   read_file: "读代码",
   finish: "结束",
+  read_chat_history: "读历史对话",
 };
 
 /**
@@ -119,6 +123,7 @@ export default function ChatPanel({
 
             {turn.role === "assistant" && (
               <div className="mt-1 space-y-1 text-[11px] text-neutral-500">
+                <p>{turn.provider?.model || "原模型未记录"}{turn.provider?.host ? ` · ${turn.provider.host}` : ""}{turn.output_language ? ` · ${turn.output_language === "zh-CN" ? "简体中文" : "English"}` : ""}{turn.ts ? ` · ${new Date(turn.ts * 1000).toLocaleString()}` : ""}</p>
                 {(turn.partial || (turn.status && turn.status !== "ok")) && <p className="text-amber-800 dark:text-amber-300" role="status">本轮未完整交付：{turn.stopped_reason || "回答中断"}。可以重新发送问题继续询问。</p>}
                 <div className="flex flex-wrap items-center gap-1">
                   <span>{turn.tools_used && turn.tools_used.length > 0 ? "这次查了：" : "这次没有查（凭已有产物回答）"}</span>
@@ -167,7 +172,7 @@ export default function ChatPanel({
       <div className="border-t border-neutral-200 p-3 dark:border-neutral-800">
         <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
           <span className="min-w-0 break-words text-teal-800 dark:text-teal-200">
-            {context ? `针对 ${context.name}` : "针对整篇论文"}
+            {context ? <>针对 <Markdown inline text={context.name} /></> : "针对整篇论文"}
           </span>
           <button type="button" onClick={onClearContext} className="min-h-8 rounded px-2 text-neutral-500 underline underline-offset-4">
             {context ? "改问整篇论文" : "回到当前创新点"}

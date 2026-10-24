@@ -11,7 +11,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import time
 from pathlib import Path
@@ -26,7 +25,7 @@ _CITATION = re.compile(
     r"(?::(\d+)(?:\s*[-–~]\s*(\d+))?)?"
 )
 
-MAX_TRANSCRIPT_TURNS = 12  # 带进上下文的历史轮数（再往前的就不发了，控制 token）
+MAX_TRANSCRIPT_TURNS = 12  # 近期消息直接带入；更早消息通过只读工具按需读取。
 
 
 def transcript_path(run_id: str) -> Path:
@@ -37,18 +36,17 @@ def load_transcript(run_id: str) -> list[dict[str, Any]]:
     path = transcript_path(run_id)
     if not path.exists():
         return []
-    turns: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            turns.append(json.loads(line))
+    from .history import read_journal
+    warnings: list[str] = []
+    turns = read_journal(path, warnings)
+    if warnings:
+        raise ValueError("；".join(warnings))
     return turns
 
 
 def append_turn(run_id: str, role: str, text: str, **extra: Any) -> dict[str, Any]:
     turn = {"role": role, "text": text, "ts": time.time(), **extra}
-    with transcript_path(run_id).open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(turn, ensure_ascii=False, default=str) + "\n")
+    store.append_jsonl(transcript_path(run_id), turn)
     return turn
 
 
@@ -100,15 +98,15 @@ def verify_citations(repo: RepoSource | None, text: str) -> list[dict[str, Any]]
     return results
 
 
-def build_context_block(artifact: dict[str, Any] | None, context_ids: list[str] | None = None) -> str:
+def build_context_block(artifact: dict[str, Any] | None, context_ids: list[str] | None = None,
+                        *, plan: dict | None = None, paper: dict | None = None) -> str:
     """把已有分析产物压成一段上下文。用户指定了 context_ids 就把那几条完整展开。"""
-    if not artifact:
-        return "（这个 run 还没有任何分析产物：用户可能还没跑阶段 A/B。）"
+    artifact = artifact or {}
 
     wanted = {item for item in (context_ids or []) if item}
-    lines: list[str] = []
+    lines: list[str] = ["以下为此前保存的解读材料，可能由其他模型生成。保留其来源；本次仅回答问题，不修改旧结论。"]
     run_block = artifact.get("run") or {}
-    paper = run_block.get("paper") or {}
+    paper = run_block.get("paper") or paper or {}
     repo = run_block.get("repo") or {}
     lines.append(f"论文：{paper.get('title_guess') or '（无标题）'}，共 {paper.get('page_count')} 页")
     if repo:
@@ -120,8 +118,15 @@ def build_context_block(artifact: dict[str, Any] | None, context_ids: list[str] 
             f"（{verification.get('citations_verified')}/{verification.get('citations_total')} 条通过）"
         )
 
-    for item in artifact.get("innovations", []):
-        focus = item.get("id") in wanted
+    if plan:
+        lines.append(f"已有论文摘要：{plan.get('paper_summary') or ''}")
+    # Recon-only and partial runs also provide their saved innovation list.
+    items = {item["id"]: item for item in (plan or {}).get("innovations", [])}
+    items.update({item["id"]: item for item in artifact.get("innovations", [])})
+    if not items:
+        lines.append("尚无已保存的创新点或代码定位结论；不要假定定位已经完成。")
+    for item in items.values():
+        focus = not wanted or item.get("id") in wanted
         lines.append("")
         lines.append(f"### {item.get('id')} · {item.get('name')}（status={item.get('status')}，置信度 {item.get('confidence')}）")
         if item.get("one_liner"):
@@ -139,6 +144,8 @@ def build_context_block(artifact: dict[str, Any] | None, context_ids: list[str] 
         explanation = item.get("explanation") or {}
         if explanation.get("intuition"):
             lines.append(f"已有解释（直觉）：{explanation['intuition']}")
+        if explanation.get("math"):
+            lines.append(f"已有解释（数学）：{explanation['math']}")
         if focus:
             for step in explanation.get("code_walkthrough") or []:
                 lines.append(f"  逐段讲解：{step.get('line_ref')} → {step.get('text')}")
@@ -153,9 +160,10 @@ def build_chat_prompt(transcript: list[dict[str, Any]], question: str, context_i
     history = transcript[-MAX_TRANSCRIPT_TURNS:]
     chunks: list[str] = []
     if history:
-        chunks.append("## 之前的对话")
+        chunks.append(f"## 历史对话（共 {len(transcript)} 条，以下为最近 {len(history)} 条；更早内容可用 read_chat_history 读取）")
         for turn in history:
-            speaker = "用户" if turn.get("role") == "user" else "你"
+            model = (turn.get("provider") or {}).get("model") or "来源未记录"
+            speaker = "用户" if turn.get("role") == "user" else f"历史助手（{model}）"
             chunks.append(f"{speaker}：{turn.get('text')}")
     if context_ids:
         chunks.append("")

@@ -131,7 +131,47 @@ export interface RunEvent {
   id: number;
   type: string;
   ts: number;
+  operation_id?: string | null;
   data: Record<string, any>;
+}
+
+export interface ProviderSummary {
+  protocol?: string;
+  model?: string;
+  host?: string;
+}
+
+export interface HistoryEntry {
+  run_id: string;
+  title: string;
+  filename?: string;
+  created_at: number;
+  updated_at: number;
+  analysis_status: string;
+  innovation_count: number;
+  result_count: number;
+  original_provider?: ProviderSummary | null;
+  latest_operation?: { id?: string; phase: string; status: string; reason?: string; provider?: ProviderSummary } | null;
+  warnings: string[];
+}
+
+export interface RunSnapshot {
+  run_id: string;
+  paper: PaperMeta | null;
+  plan: Plan | null;
+  artifact: { innovations: Finding[]; missing_ids?: string[] } | null;
+  findings: Finding[];
+  verification: VerificationSummary | null;
+  turns: import("../components/ChatPanel").ChatTurn[];
+  repo: { commit_sha: string; files_total?: number; url?: string } | null;
+  history: HistoryEntry;
+  resources: { paper: boolean; repo: boolean };
+  warnings: string[];
+  can_chat: boolean;
+  active: boolean;
+  event_cursor: number;
+  events: RunEvent[];
+  has_older_events: boolean;
 }
 
 export interface CreateRunResponse {

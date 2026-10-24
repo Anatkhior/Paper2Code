@@ -100,7 +100,9 @@ async def collect_sse(
                     block, buffer = buffer.split("\n\n", 1)
                     for line in block.splitlines():
                         if line.startswith("data:"):
-                            events.append(json.loads(line[5:].strip()))
+                            event = json.loads(line[5:].strip())
+                            if event.get("type") != "stream_idle":
+                                events.append(event)
                 if stop_on_run_end and any(e["type"] == "run_end" for e in events):
                     break
     return events, first_at, time.monotonic()
