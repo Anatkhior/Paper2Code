@@ -132,6 +132,8 @@ export interface RunEvent {
   type: string;
   ts: number;
   operation_id?: string | null;
+  // Payload shape depends on `type`; each consumer narrows the fields it reads.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   data: Record<string, any>;
 }
 

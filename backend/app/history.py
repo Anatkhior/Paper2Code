@@ -6,6 +6,7 @@ current operation journal; it never contains credentials or a resumable LLM requ
 from __future__ import annotations
 
 import json
+import shutil
 import time
 import uuid
 from functools import wraps
@@ -252,7 +253,16 @@ def record_event(run_id: str, event: dict) -> None:
     store.write_json(store.run_dir(run_id) / "history.json", entry)
 
 
-def list_history(*, query: str, offset: int, limit: int, active_ids: set[str]) -> dict:
+@serialized_index
+def delete_run(run_id: str) -> None:
+    directory = store.run_dir(run_id)
+    if directory.is_symlink() or not directory.exists():
+        raise FileNotFoundError(run_id)
+    shutil.rmtree(directory)
+
+
+def list_history(*, query: str, offset: int, limit: int, active_ids: set[str], status: str = "") -> dict:
+    wanted_statuses = {item.strip() for item in status.split(",") if item.strip()}
     entries = []
     root = settings.data_dir
     if root.exists():
@@ -265,6 +275,8 @@ def list_history(*, query: str, offset: int, limit: int, active_ids: set[str]) -
                 entry = {"run_id": directory.name, "title": directory.name, "updated_at": directory.stat().st_mtime,
                          "analysis_status": "unreadable", "warnings": [f"历史索引无法读取：{exc}"]}
             if entry.get("kind") == "m0":
+                continue
+            if wanted_statuses and entry.get("analysis_status") not in wanted_statuses:
                 continue
             if query.casefold() not in f"{entry['title']} {entry.get('filename') or ''}".casefold():
                 continue

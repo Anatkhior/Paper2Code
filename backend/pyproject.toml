@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+norecursedirs = ["data", ".venv", ".pythons", ".uv-cache", ".dev-logs"]

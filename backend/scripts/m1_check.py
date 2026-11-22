@@ -28,6 +28,7 @@ import httpx
 from .harness import (
     APP,
     APP_PORT,
+    DATA_DIR,
     MOCK_PORT,
     Checker,
     collect_sse,
@@ -70,7 +71,7 @@ async def section_a(check: Checker) -> None:
 
     check.section("A. 论文层与工具护栏（不经过 LLM）")
     small, huge = ensure_fixtures(ROOT)
-    work = ROOT / "data" / f"unit-{int(time.time() * 1000)}"
+    work = DATA_DIR / f"unit-{int(time.time() * 1000)}"
     work.mkdir(parents=True, exist_ok=True)
     bus = RunBus("unit", work / "events.jsonl")
     tools = {tool.name: tool for tool in PAPER_TOOLS}
@@ -295,7 +296,7 @@ async def section_b(check: Checker, client: httpx.AsyncClient) -> None:
         "GET /api/runs/{id} 能拿到落盘的 plan（刷新页面不丢产物）",
     )
     check(
-        (ROOT / "data" / run_id / "plan.json").exists(),
+        (DATA_DIR / run_id / "plan.json").exists(),
         "plan.json 已落盘",
     )
     check(
@@ -624,7 +625,7 @@ async def section_g(check: Checker, client: httpx.AsyncClient) -> None:
         "token 节流：窗口内快超限就等、没超就不等（TPM 靠它而不是靠拉长请求间隔）",
     )
     providers_module.reset_llm_pacing()
-    pace_file = ROOT / "data" / "llm-pace.json"
+    pace_file = DATA_DIR / "llm-pace.json"
     if pace_file.exists():
         text = pace_file.read_text(encoding="utf-8")
         check(

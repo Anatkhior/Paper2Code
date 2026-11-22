@@ -31,6 +31,7 @@ import httpx
 from .harness import (
     APP,
     APP_PORT,
+    DATA_DIR,
     MOCK_PORT,
     Checker,
     collect_sse,
@@ -111,8 +112,8 @@ async def section_a(check: Checker, client: httpx.AsyncClient) -> str:
         "回显 focus 区间（前端据此高亮）",
     )
 
-    artifact = json.loads((ROOT / "data" / run_id / "artifact.json").read_text(encoding="utf-8"))
-    repo = RepoSource(ROOT / "data" / run_id / "repo", artifact["run"]["repo"]["commit_sha"])
+    artifact = json.loads((DATA_DIR / run_id / "artifact.json").read_text(encoding="utf-8"))
+    repo = RepoSource(DATA_DIR / run_id / "repo", artifact["run"]["repo"]["commit_sha"])
     from_git = repo.content_at_commit("loralib/layers.py").split("\n")[FORWARD[0] - 1 : FORWARD[1]]
     check(
         [row["text"] for row in view["lines"]] == from_git,
@@ -223,7 +224,7 @@ async def section_a(check: Checker, client: httpx.AsyncClient) -> str:
     check(bad_image.status_code == 422, f"渲染越界页 → 422（HTTP {bad_image.status_code}）")
 
     # ---- 跨行 / 连字符折行 / 公式的引文：必须覆盖折行后的部分（2026-09-17 用户反馈）----
-    hard_pdf = ROOT / "data" / f"hard-page-{int(time.time() * 1000)}.pdf"
+    hard_pdf = DATA_DIR / f"hard-page-{int(time.time() * 1000)}.pdf"
     hard_quote = build_hard_case_pdf(hard_pdf)
     hard_run = (
         await client.post(

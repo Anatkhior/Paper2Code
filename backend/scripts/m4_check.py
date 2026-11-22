@@ -15,12 +15,13 @@ D. README 一致性 —— README 里贴的数字必须和 report.json 对得上
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-from .harness import Checker, ROOT
+from .harness import Checker, DATA_DIR, ROOT
 
 GOLDSET = ROOT / "eval" / "goldset.yaml"
 REPORT = ROOT / "eval" / "report.json"
@@ -251,6 +252,7 @@ def section_c(check: Checker) -> dict[str, Any]:
     result = subprocess.run(
         [sys.executable, "-m", "eval.run_eval"],
         cwd=ROOT,
+        env={**os.environ, "PAPER2CODE_DATA_DIR": str(DATA_DIR)},
         capture_output=True,
         text=True,
         timeout=900,

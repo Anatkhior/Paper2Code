@@ -1,8 +1,13 @@
 import type { CreateRunResponse, HistoryEntry, RunSnapshot, RunEvent, OutputLanguage, ProviderConfig, SmokeResult } from "./types";
 
-export async function fetchHistory(query: string, offset = 0, signal?: AbortSignal): Promise<{ items: HistoryEntry[]; total: number; limit: number }> {
+export async function fetchHistory(query: string, offset = 0, signal?: AbortSignal, status = ""): Promise<{ items: HistoryEntry[]; total: number; limit: number }> {
   const params = new URLSearchParams({ q: query, offset: String(offset), limit: "20" });
+  if (status) params.set("status", status);
   return jsonOrThrow(await fetch(`${API_BASE}/api/runs?${params}`, { signal, cache: "no-store" }));
+}
+
+export async function deleteRun(runId: string): Promise<{ deleted: boolean; run_id: string }> {
+  return jsonOrThrow(await fetch(`${API_BASE}/api/runs/${encodeURIComponent(runId)}`, { method: "DELETE" }));
 }
 
 export async function fetchSnapshot(runId: string, signal?: AbortSignal): Promise<RunSnapshot> {

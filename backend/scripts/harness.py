@@ -7,10 +7,12 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,14 @@ import httpx
 from app.config_compat import canonical_env
 
 ROOT = Path(__file__).resolve().parents[1]
+# 验收脚本隔离数据目录：避免每次跑验收都往工作区 backend/data/ 写入大量合成测试记录，
+# 污染用户的历史列表与磁盘。调用方显式指定 PAPER2CODE_DATA_DIR 时尊重它。
+_TEMP_DATA_DIR: tempfile.TemporaryDirectory[str] | None = None
+if not os.environ.get("PAPER2CODE_DATA_DIR"):
+    _TEMP_DATA_DIR = tempfile.TemporaryDirectory(prefix="paper2code-check-")
+    os.environ["PAPER2CODE_DATA_DIR"] = _TEMP_DATA_DIR.name
+    atexit.register(_TEMP_DATA_DIR.cleanup)
+DATA_DIR = Path(os.environ["PAPER2CODE_DATA_DIR"])
 # 验收脚本用专属端口：这样你手动起的 mock/后端（8123/8000）不会和验收互抢，
 # 也就不会出现"测试连到了旧代码的服务上"这种鬼故事。
 MOCK_PORT = 8231
@@ -88,7 +98,11 @@ def service_env(extra_env: dict[str, str] | None = None, *, pin_local_config: bo
     # 反过来，跑真实模型时（pin_local_config=False）必须尊重这些配置：
     # 钉成 0 等于关掉用户为自己网关设的节流，一路撞 429。
     pinned = (
-        {"PAPER2CODE_LLM_MAX_REQUESTS_PER_MINUTE": "0", "PAPER2CODE_REPO_NETWORK_MODE": "local"}
+        {
+            "PAPER2CODE_LLM_MAX_REQUESTS_PER_MINUTE": "0",
+            "PAPER2CODE_REPO_NETWORK_MODE": "local",
+            "PAPER2CODE_DATA_DIR": str(DATA_DIR),
+        }
         if pin_local_config
         else {}
     )

@@ -44,6 +44,7 @@ test("没有 chat_reply 的结束也解除 busy，限流/取消明确显示", ()
   assert.match(chatState(events).status, /7.5/);
   events.push(event(3, "run_end", { status: "cancelled", stopped_reason: "用户取消" }));
   assert.equal(chatState(events).ended, true);
+  assert.equal(chatState(events).incomplete, true);
   assert.match(chatState(events).status, /未收到完整回答/);
   assert.equal(chatState(events).reason, "用户取消");
 });
@@ -53,6 +54,7 @@ test("新的问题不受旧回答状态影响，部分答案保留中断状态",
     event(4, "chat_user"), event(5, "chat_reply", { message: "部分", status: "failed", partial: true })];
   const state = chatState(events);
   assert.equal(state.reply.text, "部分");
+  assert.equal(state.incomplete, true);
   assert.match(state.status, /未完整交付/);
 });
 

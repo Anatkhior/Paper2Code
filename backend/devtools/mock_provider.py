@@ -577,9 +577,11 @@ def _chat_answer(with_citation: bool, bad_citation: bool = False, saw_history: b
 def chat_action(messages: list[dict[str, Any]], model: str, tool_names: list[str]) -> list[str]:
     last = messages[-1]
     tool_rounds = len([m for m in messages if m.get("role") == "tool"])
-    # 用户提示里若带着"## 之前的对话"，说明历史确实被传进来了 —— 回一句标记，让测试能验证这件事
+    # 用户提示里若带着历史对话段落，说明历史确实被传进来了 —— 回一句标记，让测试能验证这件事
     saw_history = any(
-        "## 之前的对话" in (m.get("content") or "") for m in messages if m.get("role") == "user"
+        ("## 历史对话" in (m.get("content") or "") or "## 之前的对话" in (m.get("content") or ""))
+        for m in messages
+        if m.get("role") == "user"
     )
 
     if not tool_names:

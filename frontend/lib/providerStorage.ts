@@ -1,6 +1,8 @@
 type Store = Pick<Storage, "getItem" | "setItem">;
 export const PROVIDER_STORAGE_KEY = "paper2code.provider.v1";
 export const TIMELINE_STORAGE_KEY = "paper2code.timelineOpen";
+export const THEME_STORAGE_KEY = "paper2code.theme";
+export const ACTIVE_RUN_SESSION_KEY = "paper2code.activeRunId";
 
 /** 仅首次迁移旧名称；没有明确 remember_key=true 的密钥绝不写入新存储。 */
 export function migrateStorage(storage: Store) {

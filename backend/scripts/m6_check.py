@@ -273,13 +273,14 @@ async def section_c(check: Checker) -> None:
         check(False, "前端依赖或 pnpm 不可用")
         return
 
+    test_files = sorted(str(path.relative_to(FRONTEND)) for path in (FRONTEND / "lib").glob("*.test.mjs"))
     syntax = subprocess.run(
-        ["node", "--test", "lib/syntax.test.mjs", "lib/codeAnnotations.test.mjs", "lib/markdownBlocks.test.mjs", "lib/chatState.test.mjs"],
+        ["node", "--test", *test_files],
         cwd=FRONTEND, capture_output=True, text=True, timeout=60,
     )
     check(
-        syntax.returncode == 0,
-        "代码着色保留原文，行内讲解正确映射且不丢失异常引用；残缺讲解与特殊换行符不会让页面崩溃或卡死",
+        len(test_files) >= 6 and syntax.returncode == 0,
+        f"前端 {len(test_files)} 组行为单测全部通过（语法着色、行内讲解、数学公式、语言、会话、追问状态）",
     )
     if syntax.returncode:
         print(syntax.stdout + syntax.stderr, flush=True)

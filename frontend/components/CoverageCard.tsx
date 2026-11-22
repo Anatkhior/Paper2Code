@@ -28,8 +28,8 @@ export default function CoverageCard({ events, verification, missingIds, filesTo
   const runEnd = [...events].reverse().find((event) => event.type === "run_end")?.data;
   if (!runEnd) {
     return (
-      <section className="rounded-lg border border-dashed border-neutral-300 p-4 text-sm text-neutral-500 dark:border-neutral-800">
-        <h2 className="text-sm font-semibold text-neutral-700 dark:text-neutral-300">覆盖率与预算</h2>
+      <section className="rounded-lg border border-dashed border-line-strong p-4 text-sm text-muted">
+        <h2 className="text-sm font-semibold text-foreground">覆盖率与预算</h2>
         <p className="mt-1 text-xs">
           跑完一次分析后，这里会显示：读了论文哪几页、仓库里读了多少文件、工具调用次数与 token 用量、
           <strong>以及引用核验率</strong>——产出可信到什么程度，靠这些数字判断。
@@ -85,37 +85,31 @@ export default function CoverageCard({ events, verification, missingIds, filesTo
   ];
 
   return (
-    <section className="rounded-lg border border-neutral-200 bg-white p-3 dark:border-neutral-800 dark:bg-neutral-950">
-      <div className="mb-2 flex flex-wrap items-center gap-2">
+    <section className="px-3 py-3">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
         <h2 className="text-sm font-semibold">覆盖率与预算</h2>
-        <span
-          className={`rounded px-1.5 py-0.5 text-[11px] ${
-            runEnd.status === "ok"
-              ? "bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300"
-              : "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-200"
-          }`}
-        >
+        <span data-tone={runEnd.status === "ok" ? "ok" : runEnd.status === "failed" ? "fail" : "warn"} className="badge">
           {runEnd.status} · {runEnd.stopped_reason}
         </span>
         {missingIds.length > 0 && (
-          <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] text-amber-800 dark:bg-amber-950 dark:text-amber-200">
+          <span data-tone="warn" className="badge">
             未覆盖：{missingIds.join(", ")}
           </span>
         )}
       </div>
 
-      <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 lg:grid-cols-6">
         {stats.map((stat) => (
-          <div key={stat.label}>
-            <dt className="text-[11px] text-neutral-500">{stat.label}</dt>
-            <dd className={`font-mono text-sm ${stat.warn ? "text-amber-600" : ""}`}>{stat.value}</dd>
-            {stat.hint && <dd className="mt-0.5 text-[10px] leading-tight text-neutral-400">{stat.hint}</dd>}
+          <div key={stat.label} className="min-w-0">
+            <dt className="text-xs text-muted">{stat.label}</dt>
+            <dd className={`mt-0.5 text-sm font-medium tabular-nums ${stat.warn ? "text-warn" : ""}`}>{stat.value}</dd>
+            {stat.hint && <dd className="mt-0.5 text-[11px] leading-snug text-muted">{stat.hint}</dd>}
           </div>
         ))}
       </dl>
 
       {runEnd.coverage_note && (
-        <p className="mt-2 text-[11px] text-neutral-500">
+        <p className="mt-3 text-xs leading-5 text-muted">
           Agent 自述的覆盖情况：<Markdown inline text={runEnd.coverage_note} />
         </p>
       )}

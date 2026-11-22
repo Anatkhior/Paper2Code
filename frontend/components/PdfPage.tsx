@@ -18,12 +18,13 @@ export default function PdfPage({ url, page, fallbackUrl, onReady, children }: P
   const [width, setWidth] = useState(0);
   const [document, setDocument] = useState<{ url: string; value: PDFDocumentProxy } | null>(null);
   const [loadError, setLoadError] = useState<{ url: string; message: string } | null>(null);
-  const [rendered, setRendered] = useState<{ key: string; hasText: boolean; error?: string } | null>(null);
+  const [rendered, setRendered] = useState<{ key: string; url: string; page: number; hasText: boolean; error?: string } | null>(null);
   const [fallbackLoaded, setFallbackLoaded] = useState<string | null>(null);
   const imageKey = JSON.stringify([url, page, fallbackUrl]);
   const key = JSON.stringify([url, page, width]);
   const error = loadError?.url === url ? loadError.message : rendered?.key === key ? rendered.error : null;
   const ready = rendered?.key === key && !error;
+  const samePagePainted = rendered?.url === url && rendered?.page === page && !rendered.error;
 
   useEffect(() => {
     const element = host.current;
@@ -57,8 +58,10 @@ export default function PdfPage({ url, page, fallbackUrl, onReady, children }: P
     let canvasTask: RenderTask | undefined;
     let textTask: TextLayer | undefined;
     const container = slot.current;
-    // 每次使用独立 canvas，避免快速翻页时旧异步任务继续画到新页上。
-    container.replaceChildren();
+    // 换页或换文档时先清空；同页缩放/重排保留上一帧画布，待新帧画完再原子替换，避免闪烁。
+    if (container.dataset.renderedPage !== `${url}#${page}`) {
+      container.replaceChildren();
+    }
     void (async () => {
       const [pdfjs, pdfPage] = await Promise.all([import("pdfjs-dist"), document.value.getPage(page)]);
       if (cancelled) return;
@@ -85,23 +88,24 @@ export default function PdfPage({ url, page, fallbackUrl, onReady, children }: P
       if (cancelled) return;
       container.style.width = `${viewport.width}px`;
       container.style.height = `${viewport.height}px`;
+      container.dataset.renderedPage = `${url}#${page}`;
       container.replaceChildren(canvas, layer);
-      setRendered({ key, hasText: content.items.some((item) => "str" in item && item.str.trim()) });
+      setRendered({ key, url, page, hasText: content.items.some((item) => "str" in item && item.str.trim()) });
       onReady?.();
     })().catch((caught: unknown) => {
-      if (!cancelled) setRendered({ key, hasText: false, error: String(caught) });
+      if (!cancelled) setRendered({ key, url, page, hasText: false, error: String(caught) });
     });
     return () => { cancelled = true; canvasTask?.cancel(); textTask?.cancel(); };
   }, [document, url, page, width, key, onReady]);
 
   return <div ref={host} className="pdf-page" data-page={page} aria-busy={!ready && !error}>
-    {!ready && !error && <p role="status" className="pdf-page-notice">正在加载 PDF 原版及文字层…</p>}
+    {!ready && !samePagePainted && !error && <p role="status" className="pdf-page-notice">正在加载 PDF 原版及文字层…</p>}
     {error && <p role="alert" className="pdf-page-notice">文字层加载失败。正在使用页面图像，也可切换原文文本或打开 PDF。</p>}
     <div className="pdf-page-surface relative">
       {/* eslint-disable-next-line @next/next/no-img-element */}
       {error && fallbackUrl && <img key={imageKey} src={fallbackUrl} alt={`论文第 ${page} 页`} className="block h-auto w-full" onLoad={() => { setFallbackLoaded(imageKey); onReady?.(); }} />}
       <div ref={slot} className="pdf-page-layers" hidden={Boolean(error)} />
-      {(ready || (error && fallbackLoaded === imageKey)) && children}
+      {(ready || samePagePainted || (error && fallbackLoaded === imageKey)) && children}
     </div>
     {ready && !rendered.hasText && <p role="status" className="pdf-page-notice">本页没有可选择文字（可能是扫描页），暂不支持直接划选。</p>}
   </div>;

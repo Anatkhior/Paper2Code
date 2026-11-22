@@ -2,7 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import Icon from "@/components/Icon";
 import Markdown from "@/components/Markdown";
+import { toolLabel } from "@/lib/toolLabels";
 
 export interface ChatCitation {
   path: string;
@@ -32,26 +34,16 @@ interface Props {
   streaming: string;
   busy: boolean;
   progress?: string;
+  incomplete?: boolean;
   stoppedReason?: string;
   context: { id: string; name: string } | null;
+  canFocusInnovation?: boolean;
   onClearContext: () => void;
   onSend: (message: string) => void;
   disabled?: boolean;
   /** 点引用 → 让上方阅读器跳过去 */
   onOpenCitation?: (path: string, start: number, end: number) => void;
 }
-
-const TOOL_LABELS: Record<string, string> = {
-  list_pages: "列页",
-  get_page_text: "读论文页",
-  search_paper: "搜论文",
-  read_paper_all: "读全文",
-  repo_tree: "看目录",
-  search_code: "搜代码",
-  read_file: "读代码",
-  finish: "结束",
-  read_chat_history: "读历史对话",
-};
 
 /**
  * 追问对话面板。
@@ -67,15 +59,26 @@ export default function ChatPanel({
   streaming,
   busy,
   progress,
+  incomplete = false,
   stoppedReason,
   context,
+  canFocusInnovation = true,
   onClearContext,
   onSend,
   disabled,
   onOpenCitation,
 }: Props) {
   const [draft, setDraft] = useState("");
+  const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
+
+  const copyReply = async (text: string, index: number) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedIndex(index);
+      window.setTimeout(() => setCopiedIndex((current) => (current === index ? null : current)), 1600);
+    } catch { /* ignore clipboard failures */ }
+  };
 
   /**
    * 同 Timeline：只滚自己的容器，不碰窗口（scrollIntoView 会把整个页面也滚走），
@@ -97,39 +100,44 @@ export default function ChatPanel({
   };
 
   return (
-    <section className="rounded-lg border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950">
-      <header className="flex flex-wrap items-center gap-2 border-b border-neutral-200 px-3 py-2 dark:border-neutral-800">
+    <section className="panel">
+      <header className="flex flex-wrap items-baseline gap-x-3 gap-y-1 border-b border-line px-4 py-3">
         <h2 className="text-sm font-semibold">追问</h2>
-        <span className="text-[11px] text-neutral-500">
+        <span className="text-xs text-muted">
           继续问原理、实现细节，或让它对照论文解释代码。
         </span>
       </header>
 
-      {(busy || (progress && progress.includes("未"))) && <p role="status" aria-live="polite" className="px-3 py-2 text-sm text-neutral-600 dark:text-neutral-400">
-        {progress || "正在查阅资料"}{!busy && stoppedReason ? `：${stoppedReason}` : ""}
+      {(busy || incomplete) && <p role="status" aria-live="polite" data-tone={busy ? "run" : "warn"} className="flex items-center gap-2 border-b border-line px-4 py-2 text-sm text-muted">
+        <span className="status-dot" />{progress || "正在查阅资料"}{!busy && stoppedReason ? `：${stoppedReason}` : ""}
       </p>}
-      <div ref={scrollerRef} hidden={turns.length === 0 && !streaming} className="max-h-[52vh] space-y-3 overflow-auto p-3">
+      <div ref={scrollerRef} hidden={turns.length === 0 && !streaming} className="scroll-area max-h-[56vh] space-y-4 overflow-auto px-4 py-4">
         {turns.map((turn, index) => (
           <div key={`${turn.role}-${index}-${turn.ts ?? index}`} className={turn.role === "user" ? "text-right" : ""}>
             <div
-              className={`inline-block max-w-[92%] rounded-lg px-3 py-2 text-left text-sm ${
+              className={`inline-block max-w-[92%] rounded-xl px-3.5 py-2.5 text-left text-sm leading-7 ${
                 turn.role === "user"
-                  ? "bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900"
-                  : "bg-neutral-100 dark:bg-neutral-900"
+                  ? "rounded-br-sm border border-accent-line bg-accent-soft"
+                  : "rounded-bl-sm bg-subtle"
               }`}
             >
               <Markdown text={turn.text} />
             </div>
 
             {turn.role === "assistant" && (
-              <div className="mt-1 space-y-1 text-[11px] text-neutral-500">
-                <p>{turn.provider?.model || "原模型未记录"}{turn.provider?.host ? ` · ${turn.provider.host}` : ""}{turn.output_language ? ` · ${turn.output_language === "zh-CN" ? "简体中文" : "English"}` : ""}{turn.ts ? ` · ${new Date(turn.ts * 1000).toLocaleString()}` : ""}</p>
-                {(turn.partial || (turn.status && turn.status !== "ok")) && <p className="text-amber-800 dark:text-amber-300" role="status">本轮未完整交付：{turn.stopped_reason || "回答中断"}。可以重新发送问题继续询问。</p>}
+              <div className="mt-1.5 space-y-1.5 text-xs text-muted">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span>{turn.provider?.model || "原模型未记录"}{turn.provider?.host ? ` · ${turn.provider.host}` : ""}{turn.output_language ? ` · ${turn.output_language === "zh-CN" ? "简体中文" : "English"}` : ""}{turn.ts ? ` · ${new Date(turn.ts * 1000).toLocaleString()}` : ""}</span>
+                  <button type="button" onClick={() => void copyReply(turn.text, index)} className="quiet-button -my-1 text-muted">
+                    <Icon name={copiedIndex === index ? "check" : "copy"} size={12} />{copiedIndex === index ? "已复制" : "复制回答"}
+                  </button>
+                </div>
+                {(turn.partial || (turn.status && turn.status !== "ok")) && <p className="text-warn" role="status">本轮未完整交付：{turn.stopped_reason || "回答中断"}。可以重新发送问题继续询问。</p>}
                 <div className="flex flex-wrap items-center gap-1">
                   <span>{turn.tools_used && turn.tools_used.length > 0 ? "这次查了：" : "这次没有查（凭已有产物回答）"}</span>
                   {(turn.tools_used ?? []).map((tool, toolIndex) => (
-                    <span key={`${tool}-${toolIndex}`} className="rounded bg-neutral-100 px-1.5 py-0.5 font-mono dark:bg-neutral-800">
-                      {TOOL_LABELS[tool] ?? tool}
+                    <span key={`${tool}-${toolIndex}`} className="rounded-md border border-line px-1.5 py-px">
+                      {toolLabel(tool)}
                     </span>
                   ))}
                 </div>
@@ -142,14 +150,12 @@ export default function ChatPanel({
                         type="button"
                         onClick={() => onOpenCitation?.(citation.path, citation.line_start, citation.line_end)}
                         title={citation.verified ? "已在那个 commit 上核对过存在" : citation.reason}
-                        className={`rounded px-1.5 py-0.5 font-mono ${
-                          citation.verified
-                            ? "bg-green-100 text-green-800 dark:bg-green-950 dark:text-green-200"
-                            : "bg-red-100 text-red-800 dark:bg-red-950 dark:text-red-200"
-                        }`}
+                        data-tone={citation.verified ? "ok" : "fail"}
+                        className="badge font-mono hover:underline"
                       >
-                        {citation.verified ? "✅" : "⚠"} {citation.path}:{citation.line_start}
+                        {citation.path}:{citation.line_start}
                         {citation.line_end !== citation.line_start ? `-${citation.line_end}` : ""}
+                        <span className="sr-only">{citation.verified ? "（已核对）" : "（未通过核对）"}</span>
                       </button>
                     ))}
                   </div>
@@ -161,24 +167,26 @@ export default function ChatPanel({
 
         {streaming && (
           <div>
-            <div className="inline-block max-w-[92%] rounded-lg bg-neutral-100 px-3 py-2 text-sm dark:bg-neutral-900">
+            <div className="inline-block max-w-[92%] rounded-xl rounded-bl-sm bg-subtle px-3.5 py-2.5 text-sm leading-7">
               <Markdown text={streaming} />
             </div>
-            <p className="mt-1 text-[11px] text-neutral-500">正在回答…</p>
+            <p className="mt-1.5 text-xs text-muted">正在回答…</p>
           </div>
         )}
       </div>
 
-      <div className="border-t border-neutral-200 p-3 dark:border-neutral-800">
+      <div className="border-t border-line px-4 py-3">
         <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
-          <span className="min-w-0 break-words text-teal-800 dark:text-teal-200">
+          <span className="min-w-0 break-words text-accent">
             {context ? <>针对 <Markdown inline text={context.name} /></> : "针对整篇论文"}
           </span>
-          <button type="button" onClick={onClearContext} className="min-h-8 rounded px-2 text-neutral-500 underline underline-offset-4">
-            {context ? "改问整篇论文" : "回到当前创新点"}
-          </button>
+          {(context || canFocusInnovation) && (
+            <button type="button" onClick={onClearContext} className="quiet-button">
+              {context ? "改问整篇论文" : "回到当前创新点"}
+            </button>
+          )}
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
           <textarea
             aria-label="追问内容"
             aria-describedby="chat-input-help"
@@ -192,18 +200,18 @@ export default function ChatPanel({
             }}
             rows={2}
             placeholder="例如：这个 scaling 在哪里用到？"
-            className="min-h-[72px] min-w-0 flex-1 resize-y rounded border border-neutral-300 bg-transparent px-2 py-1 text-sm dark:border-neutral-700"
+            className="field min-h-[4.5rem] flex-1 resize-y"
           />
           <button
             type="button"
             onClick={submit}
             disabled={busy || disabled || !draft.trim()}
-            className="rounded bg-neutral-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-40 dark:bg-neutral-100 dark:text-neutral-900"
+            className="primary-button sm:min-w-24"
           >
             {busy ? "回答中…" : "发送"}
           </button>
         </div>
-        <p id="chat-input-help" className="mt-2 text-[11px] text-neutral-500">{disabled ? "分析进行中，可先写好问题，结束后发送。" : "Enter 发送 · Shift+Enter 换行"}</p>
+        <p id="chat-input-help" className="mt-2 text-xs text-muted">{disabled ? "分析进行中，可先写好问题，结束后发送。" : "Enter 发送 · Shift+Enter 换行"}</p>
       </div>
     </section>
   );

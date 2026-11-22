@@ -32,6 +32,7 @@ import httpx
 from .harness import (
     APP,
     APP_PORT,
+    DATA_DIR,
     MOCK_PORT,
     Checker,
     collect_sse,
@@ -92,7 +93,7 @@ async def section_a(check: Checker) -> dict[str, Any]:
     check.section("A. 仓库层与工具护栏（不经过 LLM）")
     ensure_fixtures(ROOT)
     source_repo = build_repo(ROOT)
-    work = ROOT / "data" / f"unit-m2-{int(time.time() * 1000)}"
+    work = DATA_DIR / f"unit-m2-{int(time.time() * 1000)}"
     work.mkdir(parents=True, exist_ok=True)
 
     # ---- URL 校验（临时改配置测护栏，测完恢复）----
@@ -1010,7 +1011,7 @@ async def section_b(check: Checker, client: httpx.AsyncClient) -> str:
     check(payload["status_counts"].get("not_found") == 1, "统计里如实包含 not_found")
     check(done[0]["data"]["missing_ids"] == [], "没有漏掉任何一条创新点")
 
-    artifact_path = ROOT / "data" / run_id / "artifact.json"
+    artifact_path = DATA_DIR / run_id / "artifact.json"
     artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
     check(artifact["run"]["repo"]["commit_sha"] == repo_ready["commit_sha"], "产物里的 commit 与克隆时一致")
     check(artifact["run"]["paper"]["page_count"] == 6, "产物里带上了论文信息")
@@ -1026,7 +1027,7 @@ async def section_b(check: Checker, client: httpx.AsyncClient) -> str:
     from app.repo_source import RepoSource
     from app.verify import verify_artifact
 
-    repo = RepoSource(ROOT / "data" / run_id / "repo", artifact["run"]["repo"]["commit_sha"])
+    repo = RepoSource(DATA_DIR / run_id / "repo", artifact["run"]["repo"]["commit_sha"])
     replay = verify_artifact(repo, copy.deepcopy(artifact))
     check(
         replay["citation_verifiable_rate"] == artifact["verification"]["citation_verifiable_rate"],
@@ -1292,7 +1293,7 @@ async def section_d(check: Checker, prepared_run_id: str) -> None:
         check(response.status_code == 404, f"未知 run → 404（HTTP {response.status_code}）")
 
     # 克隆失败（仓库不存在）应当转成 RepoError 而不是裸的异常
-    target = ROOT / "data" / f"clone-fail-{int(time.time())}"
+    target = DATA_DIR / f"clone-fail-{int(time.time())}"
     shutil.rmtree(target, ignore_errors=True)
     try:
         clone_repo("https://github.com/earendil-works/this-repo-does-not-exist-xyz", target)

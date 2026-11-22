@@ -29,6 +29,15 @@ export const HISTORY_STATUS: Record<string, string> = {
   partial: "部分完成", failed: "失败，已保存进展", cancelled: "已取消", interrupted: "任务已中断", unreadable: "记录需要修复",
 };
 
+/** 历史与操作状态的语气：进行中、完成、需留意、失败；其余保持中性。 */
+export function statusTone(status: string | undefined): "run" | "ok" | "warn" | "fail" | "muted" {
+  if (status === "running") return "run";
+  if (status === "ok" || status === "complete" || status === "recon_complete") return "ok";
+  if (status === "partial" || status === "cancelled" || status === "interrupted") return "warn";
+  if (status === "failed" || status === "unreadable") return "fail";
+  return "muted";
+}
+
 export function providerChange(previous: import("./types").ProviderConfig, next: import("./types").ProviderConfig) {
   const endpoint = (value?: string | null) => (value ?? "").trim().replace(/\/+$/, "");
   const changed = previous.protocol !== next.protocol || endpoint(previous.base_url) !== endpoint(next.base_url);

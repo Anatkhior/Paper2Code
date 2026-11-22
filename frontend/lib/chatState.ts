@@ -26,9 +26,10 @@ export function chatState(events: RunEvent[]) {
   let streaming = "";
   let mode = "research";
   let ended = false;
+  let incomplete = false;
   let reply: ChatTurn | null = null;
   let reason = "";
-  if (start < 0) return { status, streaming, ended, reply, reason, userId: 0 };
+  if (start < 0) return { status, streaming, ended, incomplete, reply, reason, userId: 0 };
   for (const event of events.slice(start + 1)) {
     const data = event.data;
     if (event.type === "step_start") {
@@ -49,13 +50,17 @@ export function chatState(events: RunEvent[]) {
       reply = chatTurnFromEvent(event);
       streaming = "";
       ended = true;
-      status = reply.partial || (reply.status && reply.status !== "ok") ? "本轮未完整交付" : "回答已完成";
+      incomplete = Boolean(reply.partial || (reply.status && reply.status !== "ok"));
+      status = incomplete ? "本轮未完整交付" : "回答已完成";
       reason = reply.stopped_reason ?? "";
     } else if (event.type === "run_end") {
       ended = true;
       reason = String(data.stopped_reason ?? "");
-      if (!reply) status = "本轮已结束，未收到完整回答";
+      if (!reply) {
+        incomplete = true;
+        status = "本轮已结束，未收到完整回答";
+      }
     }
   }
-  return { status, streaming, ended, reply, reason, userId: events[start].id };
+  return { status, streaming, ended, incomplete, reply, reason, userId: events[start].id };
 }

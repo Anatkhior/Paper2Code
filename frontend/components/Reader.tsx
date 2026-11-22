@@ -4,9 +4,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 
 const PdfPage = dynamic(() => import("./PdfPage"), { ssr: false });
+import Icon from "@/components/Icon";
 import { highlightCode } from "@/lib/syntax";
 import Markdown from "@/components/Markdown";
 import { placeCodeAnnotations, type CodeAnnotation, type WalkthroughStep } from "@/lib/codeAnnotations";
+
+const ZOOM_LEVELS = [1, 1.25, 1.5, 2] as const;
 
 export interface CodePane {
   path: string;
@@ -99,7 +102,9 @@ export default function Reader({
   pdfUrl, pageImageUrl, onGoToPage, onSelectTarget,
 }: Props) {
   const [paperMode, setPaperMode] = useState<PaperMode>("pdf");
-  const [paperZoom, setPaperZoom] = useState(1);
+  const [paperZoom, setPaperZoom] = useState<number>(1);
+  const [pageDraft, setPageDraft] = useState<{ page: number; value: string } | null>(null);
+  const [copiedCodeRef, setCopiedCodeRef] = useState(false);
   const focusRef = useRef<HTMLDivElement>(null);
   const codeBodyRef = useRef<HTMLDivElement>(null);
   const paperMarkRef = useRef<HTMLElement>(null);
@@ -119,11 +124,41 @@ export default function Reader({
     [left],
   );
 
-  useEffect(() => {
+  const centerCodeFocus = useCallback(() => {
     const box = codeBodyRef.current;
     const target = focusRef.current;
     if (box && target) box.scrollTop += target.getBoundingClientRect().top - box.getBoundingClientRect().top - box.clientHeight / 2;
-  }, [right?.path, right?.start, right?.end, right?.lines, activeTab, walkthrough]);
+  }, []);
+
+  useEffect(() => {
+    centerCodeFocus();
+  }, [centerCodeFocus, right?.path, right?.start, right?.end, right?.lines, activeTab, walkthrough]);
+
+  const stepZoom = (delta: number) => {
+    const index = ZOOM_LEVELS.findIndex((level) => level >= paperZoom);
+    const current = index < 0 ? ZOOM_LEVELS.length - 1 : index;
+    const next = Math.min(ZOOM_LEVELS.length - 1, Math.max(0, current + delta));
+    setPaperZoom(ZOOM_LEVELS[next]);
+  };
+
+  const commitPageJump = () => {
+    if (!left || !pageDraft) return;
+    const parsed = Number.parseInt(pageDraft.value.trim(), 10);
+    setPageDraft(null);
+    if (!Number.isFinite(parsed)) return;
+    const clamped = Math.min(left.pageCount ?? parsed, Math.max(1, parsed));
+    if (clamped !== left.page) onGoToPage(clamped);
+  };
+
+  const copyCodeRef = async () => {
+    if (!right) return;
+    const ref = `${right.path}:${right.start}${right.end !== right.start ? `-${right.end}` : ""}`;
+    try {
+      await navigator.clipboard.writeText(ref);
+      setCopiedCodeRef(true);
+      window.setTimeout(() => setCopiedCodeRef(false), 1600);
+    } catch { /* ignore clipboard errors */ }
+  };
 
   /**
    * 左栏的高亮自动进视野。
@@ -167,12 +202,24 @@ export default function Reader({
   }, [left, paperMode, selectionOwner]);
 
   useEffect(() => {
-    window.getSelection()?.removeAllRanges();
+    // 仅清理位于论文阅读器内的旧选区，不误伤用户在追问/结论里选中的文字。
+    const active = window.getSelection();
+    if (active?.rangeCount) {
+      const range = active.getRangeAt(0);
+      if (pdfSurfaceRef.current?.contains(range.startContainer) || paperBodyRef.current?.contains(range.startContainer)) {
+        active.removeAllRanges();
+      }
+    }
     const changed = () => handleSelection();
     const escape = (event: KeyboardEvent) => {
       if (event.key === "Escape") { setSelection(null); window.getSelection()?.removeAllRanges(); }
     };
-    const clearOnScroll = () => setSelection(null);
+    const clearOnScroll = (event: Event) => {
+      const target = event.target;
+      if (target === document || target === document.documentElement || target === pdfBoxRef.current || target === paperBodyRef.current) {
+        setSelection(null);
+      }
+    };
     document.addEventListener("scroll", clearOnScroll, true);
     document.addEventListener("selectionchange", changed);
     document.addEventListener("keydown", escape);
@@ -227,7 +274,7 @@ export default function Reader({
             top: Math.max(8, currentSelection.y - 44),
             transform: "translateX(-50%)",
           }}
-          className="z-40 rounded-md bg-neutral-900 px-3 py-1.5 text-xs font-medium text-white shadow-lg dark:bg-neutral-100 dark:text-neutral-900"
+          className="primary-button z-40 min-h-9 px-3 py-1.5 text-xs shadow-[0_8px_24px_-8px_rgb(0_0_0/0.45)]"
           onPointerDown={(event) => event.preventDefault()}
           disabled={currentSelection.text.length > 1200}
           onClick={() => {
@@ -239,32 +286,56 @@ export default function Reader({
           {currentSelection.text.length > 1200 ? "选段超过 1200 字，请缩短后重试" : "以此为目标定位代码"}
         </button>
       )}
-      <section id="paper-pane" className={`reader-pane rounded-xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950 ${activeTab !== "paper" ? "reader-mobile-hidden" : ""}`}>
-        <header className="flex flex-wrap items-center gap-2 border-b border-neutral-200 px-3 py-2 dark:border-neutral-800">
+      <section id="paper-pane" className={`reader-pane panel ${activeTab !== "paper" ? "reader-mobile-hidden" : ""}`}>
+        <header className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2">
           <h3 className="text-sm font-semibold">论文原文</h3>
           {left && <>
-            <span className="text-xs text-neutral-500">第 {left.page} 页{left.pageCount ? ` / ${left.pageCount}` : ""}</span>
+            <form
+              className="flex items-center gap-1 text-xs tabular-nums text-muted"
+              onSubmit={(event) => { event.preventDefault(); commitPageJump(); }}
+            >
+              <span>第</span>
+              <input
+                type="text"
+                inputMode="numeric"
+                aria-label="跳转到指定页"
+                disabled={left.loading}
+                value={pageDraft?.page === left.page ? pageDraft.value : String(left.page)}
+                onChange={(event) => setPageDraft({ page: left.page, value: event.target.value.replace(/[^\d]/g, "") })}
+                onBlur={commitPageJump}
+                onKeyDown={(event) => { if (event.key === "Escape") { setPageDraft(null); event.currentTarget.blur(); } }}
+                className="page-jump"
+              />
+              <span>页{left.pageCount ? ` / ${left.pageCount}` : ""}</span>
+            </form>
             <div className="ml-auto flex gap-1">
               <button type="button" disabled={left.loading || left.page <= 1} onClick={() => onGoToPage(left.page - 1)} className="reader-control">上一页</button>
               <button type="button" disabled={left.loading || Boolean(left.pageCount && left.page >= left.pageCount)} onClick={() => onGoToPage(left.page + 1)} className="reader-control">下一页</button>
             </div>
           </>}
         </header>
-        <div className="flex flex-wrap items-center gap-1 border-b border-neutral-200 px-3 py-1 dark:border-neutral-800" role="group" aria-label="原文格式">
+        <div className="flex flex-wrap items-center gap-1 border-b border-line px-3 py-1" role="group" aria-label="原文格式">
           <button type="button" aria-pressed={paperMode === "pdf"} onClick={() => setPaperMode("pdf")} className="reader-tab">PDF 原版</button>
           <button type="button" aria-pressed={paperMode === "text"} onClick={() => setPaperMode("text")} className="reader-tab">原文文本（备用）</button>
-          {paperMode === "pdf" && <button type="button" aria-label={paperZoom === 1 ? "放大原文（两倍）" : "原文适合宽度"} onClick={() => setPaperZoom(paperZoom === 1 ? 2 : 1)} className="reader-control">{paperZoom === 1 ? "放大" : "适合宽度"}</button>}
-          {pdfUrl && <a href={`${pdfUrl}#page=${left?.page ?? 1}`} target="_blank" rel="noreferrer" className="ml-auto py-2 text-xs text-teal-700 underline underline-offset-4 dark:text-teal-300">打开 PDF</a>}
+          {paperMode === "pdf" && (
+            <span className="inline-flex items-center gap-0.5">
+              <button type="button" aria-label="缩小原文" disabled={paperZoom <= ZOOM_LEVELS[0]} onClick={() => stepZoom(-1)} className="reader-control px-2">−</button>
+              <span className="min-w-10 text-center text-xs tabular-nums text-muted">{Math.round(paperZoom * 100)}%</span>
+              <button type="button" aria-label="进一步放大原文" disabled={paperZoom >= ZOOM_LEVELS[ZOOM_LEVELS.length - 1]} onClick={() => stepZoom(1)} className="reader-control px-2">+</button>
+              <button type="button" aria-label={paperZoom === 1 ? "放大原文（两倍）" : "原文适合宽度"} onClick={() => setPaperZoom(paperZoom === 1 ? 2 : 1)} className="reader-control">{paperZoom === 1 ? "放大" : "适合宽度"}</button>
+            </span>
+          )}
+          {pdfUrl && <a href={`${pdfUrl}#page=${left?.page ?? 1}`} target="_blank" rel="noreferrer" className="text-link ml-auto py-2 text-xs underline">打开 PDF</a>}
         </div>
-        {!left && <p className="p-4 text-sm text-neutral-500">选择创新点，阅读对应原文。</p>}
-        {left?.loading && <p className="p-4 text-sm text-neutral-500" role="status">读取论文中…</p>}
-        {left?.error && <p className="p-4 text-sm text-red-600" role="alert">{left.error}</p>}
+        {!left && <p className="p-4 text-sm text-muted">选择创新点，阅读对应原文。</p>}
+        {left?.loading && <p className="p-4 text-sm text-muted" role="status">读取论文中…</p>}
+        {left?.error && <p className="p-4 text-sm text-fail" role="alert">{left.error}</p>}
         {left && !left.loading && !left.error && <>
-          <p className="px-3 py-2 text-xs text-neutral-500">
+          <p className="px-3 py-2 text-xs text-muted">
             {paperMode === "text" ? "划选一段原文，可将它加入定位目标。" : !left.quote ? "直接划选 PDF 原文，可将它加入定位目标。" : highlightStyles.length === 0 ? "本页未定位到这段引文，可切换原文文本核对。" : (left.coverage ?? 1) < 0.999 ? `引文已高亮约 ${Math.round((left.coverage ?? 0) * 100)}%，部分公式或符号未匹配。` : "引文已高亮"}
           </p>
-          {paperMode === "pdf" && <div ref={pdfBoxRef} className="reader-body min-h-0 bg-neutral-100 p-2 dark:bg-neutral-900">
-            {imageUrl && <div style={{ width: `${paperZoom * 100}%` }} className="mx-auto overflow-hidden rounded border border-neutral-300 dark:border-neutral-700">
+          {paperMode === "pdf" && <div ref={pdfBoxRef} className="reader-body min-h-0 bg-subtle p-3">
+            {imageUrl && <div style={{ width: `${paperZoom * 100}%` }} className="mx-auto overflow-hidden rounded-sm shadow-[0_1px_3px_rgb(0_0_0/0.12),0_4px_14px_-6px_rgb(0_0_0/0.18)]">
               <div ref={pdfSurfaceRef} className="pdf-surface relative">
                 {pdfUrl ? <PdfPage url={pdfUrl} page={left.page} fallbackUrl={imageUrl} onReady={centerPdf}>
                   {highlightStyles.map((style, index) => <span key={index} ref={index === 0 ? pdfMarkRef : undefined} className="pdf-highlight pointer-events-none absolute bg-amber-300/35" style={style} aria-hidden />)}
@@ -276,31 +347,40 @@ export default function Reader({
             <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed">
               {quoteParts ? <>{quoteParts.before}<mark ref={paperMarkRef} className="bg-amber-200 dark:bg-amber-800 dark:text-amber-50">{quoteParts.match}</mark>{quoteParts.after}</> : left.text}
             </pre>
-            {left.quote && !quoteParts && <p className="mt-2 text-xs text-amber-700 dark:text-amber-400">引文未逐字出现在本页，未添加文本高亮。</p>}
+            {left.quote && !quoteParts && <p className="mt-2 text-xs text-warn">引文未逐字出现在本页，未添加文本高亮。</p>}
           </div>
         </>}
       </section>
 
-      <section id="code-pane" className={`reader-pane rounded-xl border border-neutral-200 bg-white dark:border-neutral-800 dark:bg-neutral-950 ${activeTab !== "code" ? "reader-mobile-hidden" : ""}`}>
-        <header className="flex flex-wrap items-center gap-2 border-b border-neutral-200 px-3 py-2 dark:border-neutral-800">
+      <section id="code-pane" className={`reader-pane panel ${activeTab !== "code" ? "reader-mobile-hidden" : ""}`}>
+        <header className="flex flex-wrap items-center gap-2 border-b border-line px-3 py-2">
           <h3 className="text-sm font-semibold">代码实现</h3>
-          {right && <span className="text-xs text-neutral-500">{syntax.language}</span>}
-          {right?.sourceUrl && <a href={right.sourceUrl} target="_blank" rel="noreferrer" className="ml-auto py-2 text-xs text-teal-700 underline underline-offset-4 dark:text-teal-300">打开源文件</a>}
+          {right && <span className="text-xs text-muted">{syntax.language}</span>}
+          {right && !right.loading && !right.error && (
+            <div className="ml-auto flex items-center gap-1">
+              <button type="button" onClick={centerCodeFocus} className="reader-control text-muted">回到引用行</button>
+              <button type="button" onClick={() => void copyCodeRef()} className="reader-control inline-flex items-center gap-1 text-muted">
+                <Icon name={copiedCodeRef ? "check" : "copy"} size={12} />{copiedCodeRef ? "已复制" : "复制位置"}
+              </button>
+              {right.sourceUrl && <a href={right.sourceUrl} target="_blank" rel="noreferrer" className="text-link px-1.5 py-2 text-xs underline">打开源文件</a>}
+            </div>
+          )}
+          {right && (right.loading || right.error) && right.sourceUrl && <a href={right.sourceUrl} target="_blank" rel="noreferrer" className="text-link ml-auto py-2 text-xs underline">打开源文件</a>}
         </header>
-        {!right && <p className="p-4 text-sm leading-6 text-neutral-500">{codeEmpty}</p>}
+        {!right && <p className="p-4 text-sm leading-6 text-muted">{codeEmpty}</p>}
         {!right && annotations.unplaced.length > 0 && <div className="reader-body code-surface">
           {annotations.unplaced.map((annotation) => <Annotation key={annotation.id} annotation={annotation} onOpenCode={onOpenCode} />)}
         </div>}
         {right && <>
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-neutral-200 px-3 py-2 text-xs dark:border-neutral-800">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-line px-3 py-2 text-xs">
             <span className="min-w-0 break-all font-mono">{right.path}</span>
-            <span className="text-neutral-500">引用 L{right.start}–{right.end}{right.total ? ` / 共 ${right.total} 行` : ""}</span>
-            {right.total && right.lines.length > 0 && right.lines.length < right.total && <span className="text-neutral-500">当前显示 L{right.lines[0].n}–{right.lines[right.lines.length - 1].n}</span>}
-            {right.commit && <span className="ml-auto font-mono text-neutral-500" title={`核验版本 ${right.commit}`}>{right.commit.slice(0, 8)}</span>}
+            <span className="text-muted">引用 L{right.start}–{right.end}{right.total ? ` / 共 ${right.total} 行` : ""}</span>
+            {right.total && right.lines.length > 0 && right.lines.length < right.total && <span className="text-muted">当前显示 L{right.lines[0].n}–{right.lines[right.lines.length - 1].n}</span>}
+            {right.commit && <span className="ml-auto font-mono text-muted" title={`核验版本 ${right.commit}`}>{right.commit.slice(0, 8)}</span>}
           </div>
           <div ref={codeBodyRef} className="reader-body code-surface min-h-0 py-3">
-            {right.loading && <p className="px-3 text-sm text-neutral-500" role="status">读取代码中…</p>}
-            {right.error && <p className="px-3 text-sm text-red-600" role="alert">{right.error}</p>}
+            {right.loading && <p className="px-3 text-sm text-muted" role="status">读取代码中…</p>}
+            {right.error && <p className="px-3 text-sm text-fail" role="alert">{right.error}</p>}
             {!right.loading && !right.error && <div className="w-max min-w-full font-mono text-xs leading-6">
               {right.lines.map((line, index) => {
                 const inFocus = line.n >= right.start && line.n <= right.end;
@@ -315,7 +395,7 @@ export default function Reader({
               {annotations.unplaced.map((annotation) => <Annotation key={annotation.id} annotation={annotation} onOpenCode={onOpenCode} />)}
             </div>}
           </div>
-          {right.why && <Markdown text={right.why} className="border-t border-neutral-200 px-3 py-2 text-xs leading-6 text-neutral-600 dark:border-neutral-800 dark:text-neutral-400" />}
+          {right.why && <Markdown text={right.why} className="border-t border-line px-3 py-2 text-xs leading-6 text-muted" />}
         </>}
       </section>
       </div>

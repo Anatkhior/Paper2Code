@@ -27,6 +27,7 @@ import httpx
 from .harness import (
     APP,
     APP_PORT,
+    DATA_DIR,
     MOCK_PORT,
     Checker,
     collect_sse,
@@ -132,7 +133,7 @@ async def section_a(check: Checker, client: httpx.AsyncClient) -> str:
     check(transcript[0]["role"] == "user" and transcript[1]["role"] == "assistant", "顺序正确")
     check(transcript[1]["text"] == reply["message"], "落盘的文本与事件里的一致")
     check(
-        (ROOT / "data" / run_id / "chat.jsonl").exists(),
+        (DATA_DIR / run_id / "chat.jsonl").exists(),
         "对话写进了 chat.jsonl（刷新页面能恢复）",
     )
     return run_id

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -89,6 +90,15 @@ class _Run:
 
 
 RUNS: dict[str, _Run] = {}
+MAX_IDLE_RUNS_IN_MEMORY = 32
+
+
+def _evict_idle_runs() -> None:
+    """防止长时运行中历史 run 的全量事件流在内存中无限增长；运行中的 run 永不淘汰。"""
+    idle = [key for key, run in RUNS.items() if not (run.task and not run.task.done())]
+    overflow = len(idle) - MAX_IDLE_RUNS_IN_MEMORY
+    for key in idle[: max(0, overflow)]:
+        RUNS.pop(key, None)
 
 
 def _registry(run_id: str) -> _Run:
@@ -104,6 +114,7 @@ def _registry(run_id: str) -> _Run:
         run.created_at = entry["created_at"]
         run.phase = (entry.get("latest_operation") or {}).get("phase")
         RUNS[run_id] = run
+        _evict_idle_runs()
     return run
 
 
@@ -150,11 +161,29 @@ def _launch(run: _Run, job) -> None:
 
 
 @app.get("/api/runs")
-async def get_history(q: str = Query(default="", max_length=200), offset: int = Query(default=0, ge=0),
-                      limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
+async def get_history(
+    q: str = Query(default="", max_length=200),
+    status: str = Query(default="", max_length=120),
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=20, ge=1, le=100),
+) -> dict[str, Any]:
     active = {key for key, run in RUNS.items() if run.task and not run.task.done()}
     # Index migration is local file I/O, and must not stall live SSE.
-    return await asyncio.to_thread(history.list_history, query=q, offset=offset, limit=limit, active_ids=active)
+    return await asyncio.to_thread(history.list_history, query=q, status=status, offset=offset, limit=limit, active_ids=active)
+
+
+@app.delete("/api/runs/{run_id}")
+async def delete_run(run_id: str) -> dict[str, Any]:
+    _require_saved_run(run_id)
+    run = RUNS.get(run_id)
+    if run and run.task and not run.task.done():
+        raise HTTPException(status_code=409, detail="这个解读正在运行，请先停止后再删除")
+    RUNS.pop(run_id, None)
+    try:
+        await asyncio.to_thread(history.delete_run, run_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"未知的 run_id: {run_id}") from exc
+    return {"deleted": True, "run_id": run_id}
 
 
 @app.get("/api/runs/{run_id}/snapshot")
@@ -246,6 +275,7 @@ async def create_run(
     try:
         doc = PaperDocument(path, cache_dir=directory / "cache")
     except Exception as exc:  # noqa: BLE001
+        shutil.rmtree(directory, ignore_errors=True)
         raise HTTPException(status_code=400, detail=f"PDF 打不开：{exc}") from exc
 
     try:
@@ -255,6 +285,10 @@ async def create_run(
             )
         title_guess = doc.title_guess
         page_count = doc.page_count
+    except HTTPException:
+        doc.close()
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
     finally:
         doc.close()
 
@@ -968,8 +1002,15 @@ async def run_events(run_id: str, request: Request) -> EventSourceResponse:
         def idle():
             return {"event": "stream_idle", "data": '{"type":"stream_idle"}'}
 
+        def is_finished() -> bool:
+            if run.task is not None:
+                return run.task.done()
+            # 刚上传论文（phase 为空且尚无 run_end）时允许先连流、再启动阶段；
+            # 重启恢复的历史运行（已有阶段或 run_end）在回放完后主动收尾，避免连接挂起。
+            return run.phase is not None or any(item["type"] == "run_end" for item in run.bus.history)
+
         replay_cursor = run.bus.cursor
-        if last_id >= replay_cursor and (run.task is None or run.task.done()):
+        if last_id >= replay_cursor and is_finished():
             yield idle()
             return
         async for event in run.bus.subscribe(last_id):
@@ -978,7 +1019,7 @@ async def run_events(run_id: str, request: Request) -> EventSourceResponse:
             yield to_sse(event)
             # Completion can race with a slow subscriber draining queued events.
             # Close only after the CURRENT watermark, not the one at connection time.
-            finished = run.task is None or run.task.done()
+            finished = is_finished()
             terminal = event["type"] == "run_end" and event.get("operation_id") == run.bus.operation_id
             if event["id"] >= run.bus.cursor and (finished or terminal):
                 yield idle()
@@ -1030,6 +1071,8 @@ async def run_paper_page_image(run_id: str, page: int, dpi: int = 150) -> Respon
         data, media_type = doc.page_image(page, dpi=max(72, min(dpi, 300)))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        doc.close()
     return Response(
         content=data,
         media_type=media_type,

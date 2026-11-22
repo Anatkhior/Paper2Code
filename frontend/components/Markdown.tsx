@@ -16,9 +16,9 @@ const components: Components = {
   a: ({ href, children }) => href ? <a href={href} target="_blank" rel="noreferrer" className="underline">{children}</a> : <>{children}</>,
   // Keep model HTML and images inert, as in the original text-only renderer.
   img: ({ alt }) => <span>{alt}</span>,
-  code: ({ children }) => <code className="md-code rounded bg-neutral-100 px-1 py-px font-mono text-[0.92em] dark:bg-neutral-800">{children}</code>,
-  pre: ({ children }) => <pre className="overflow-auto rounded bg-neutral-100 p-2 font-mono text-xs leading-relaxed dark:bg-neutral-900">{children}</pre>,
-  blockquote: ({ children }) => <blockquote className="border-l-2 border-neutral-300 pl-2 text-neutral-600 dark:border-neutral-700 dark:text-neutral-400">{children}</blockquote>,
+  code: ({ children }) => <code className="md-code rounded bg-subtle px-1 py-px font-mono text-[0.92em]">{children}</code>,
+  pre: ({ children }) => <pre className="overflow-auto rounded border border-line bg-subtle p-2.5 font-mono text-xs leading-relaxed">{children}</pre>,
+  blockquote: ({ children }) => <blockquote className="border-l border-line-strong pl-2.5 text-muted">{children}</blockquote>,
   ul: ({ children }) => <ul className="md-list list-disc space-y-1 pl-5">{children}</ul>,
   ol: ({ children, start }) => <ol start={start} className="md-list list-decimal space-y-1 pl-5">{children}</ol>,
 };

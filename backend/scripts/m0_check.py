@@ -24,6 +24,8 @@ from typing import Any
 
 import httpx
 
+from .harness import DATA_DIR, service_env
+
 ROOT = Path(__file__).resolve().parents[1]
 MOCK_PORT = 8231
 APP_PORT = 8232
@@ -61,7 +63,7 @@ def start_service(module: str, port: int) -> subprocess.Popen:
             "warning",
         ],
         cwd=ROOT,
-        env={**os.environ, "PYTHONPATH": str(ROOT)},
+        env=service_env(),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )

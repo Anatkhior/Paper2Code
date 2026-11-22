@@ -260,3 +260,52 @@ class HistoryTest(unittest.IsolatedAsyncioTestCase):
         response = await main.run_events(run_id, SlowRequest())
         delivered = [event async for event in response.body_iterator]
         self.assertEqual([event["event"] for event in delivered][-3:], ["verification_done", "run_end", "stream_idle"])
+
+    async def test_delete_run_and_status_filter_behave_safely(self):
+        complete_id = await self.create("complete.pdf")
+        failed_id = await self.create("failed.pdf")
+        main._begin_operation(main.RUNS[complete_id], "locate", ProviderConfig(**PROVIDER_A))
+        await main.RUNS[complete_id].bus.emit("run_end", status="ok")
+        main._begin_operation(main.RUNS[failed_id], "recon", ProviderConfig(**PROVIDER_A))
+        await main.RUNS[failed_id].bus.emit("run_end", status="failed", stopped_reason="boom")
+
+        only_complete = (await self.client.get("/api/runs?status=complete")).json()
+        self.assertEqual([item["run_id"] for item in only_complete["items"]], [complete_id])
+        only_issues = (await self.client.get("/api/runs?status=failed,interrupted")).json()
+        self.assertEqual([item["run_id"] for item in only_issues["items"]], [failed_id])
+
+        # Active run cannot be deleted while running.
+        main._begin_operation(main.RUNS[failed_id], "recon", ProviderConfig(**PROVIDER_A))
+        main._launch(main.RUNS[failed_id], lambda: asyncio.sleep(30))
+        blocked = await self.client.delete(f"/api/runs/{failed_id}")
+        self.assertEqual(blocked.status_code, 409)
+        await self.client.post(f"/api/runs/{failed_id}/cancel")
+
+        deleted = await self.client.delete(f"/api/runs/{failed_id}")
+        self.assertEqual(deleted.status_code, 200)
+        self.assertTrue(deleted.json()["deleted"])
+        self.assertFalse(store.run_dir(failed_id).exists())
+        self.assertNotIn(failed_id, main.RUNS)
+        self.assertEqual((await self.client.delete(f"/api/runs/{failed_id}")).status_code, 404)
+
+    async def test_invalid_pdf_upload_leaves_no_orphan_directory_and_page_image_closes_doc(self):
+        corrupt = await self.client.post(
+            "/api/runs",
+            files={"file": ("corrupt.pdf", b"%PDF-1.4\nnot-a-real-pdf", "application/pdf")},
+            data={"provider": json.dumps(PROVIDER_A)},
+        )
+        self.assertEqual(corrupt.status_code, 400)
+        self.assertEqual(list(settings.data_dir.iterdir()) if settings.data_dir.exists() else [], [])
+
+        run_id = await self.create("image-close.pdf")
+        closed = []
+        original_close = main.PaperDocument.close
+
+        def tracked_close(doc_self):
+            closed.append(True)
+            return original_close(doc_self)
+
+        with patch.object(main.PaperDocument, "close", tracked_close):
+            image = await self.client.get(f"/api/runs/{run_id}/paper/page/1/image")
+            self.assertEqual(image.status_code, 200)
+        self.assertGreaterEqual(len(closed), 1)
