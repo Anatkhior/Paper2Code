@@ -1,192 +1,205 @@
 # Paper2code
 
-上传一篇论文 PDF + 粘贴一个 GitHub 仓库链接，系统用 Agent 自主探索，定位论文核心创新点对应的代码实现，
-并给出**可核验**的对照解读。
+**论文创新点 ↔ 代码实现的可核验对照系统**
 
-> 当前状态：**v0（M0–M4）+ v1 三阶段全部完成并验收** —— 36+162+174+54+48+60+43 = **577 项断言**全部离线可复现：
-> `cd backend && ./scripts/run_all_checks.sh`（含前端构建与生产页面渲染、gold set 评估）。
->
-> v1 已做：**双栏对照阅读器**（左栏可切「PDF 原版（保留排版，可直接划选）」与「原文文本（备用）」，
-> 右栏代码各自独立滚动、语法着色与引用行号标记）、解释全字段渲染、
-> 解释质量门槛（只有一句话的解释会被打回重写）、**在原文里划选 → 加为定位目标**、
-> **追问对话**（Agent 自己去翻论文和代码；每条消息 8 次工具调用上限；回答里的代码位置逐个机械核对）。
-> 网页上能跑通完整流程：上传论文 → 侦察出创新点清单 → 勾选 → 克隆仓库定位 → **双栏对照 + 点开看原文 + 覆盖率/核验率**。
-> 创新点以完整目录浏览，勾选与切换互不影响；右侧聚焦当前条目的解释与证据。逐段讲解嵌入对应代码行前，标明“AI 讲解 · 非仓库原文”。原文/代码随当前条目自动显示，收起后可直接展开；追问框常驻，默认针对当前创新点。窄屏切换原文/代码，目录支持方向键和 Home/End。
-> 详细规格见 [`docs/v0-spec.md`](docs/v0-spec.md)，进度见该文档 §12 里程碑表。
+上传一篇论文 PDF，再给出对应的代码仓库地址。Agent 会自主通读论文、探索仓库，把论文的核心创新点和代码实现逐条对应起来，并在双栏阅读器中对照展示与追问。**每条论文引文与代码引用都可由后端机械核验**；仓库里确实没有实现时，直接如实报告 `not_found`。
 
-## 已经能做什么
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-SSE-009688?logo=fastapi&logoColor=white)
+![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs&logoColor=white)
+![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)
+![LiteLLM](https://img.shields.io/badge/LLM-BYOK%20via%20LiteLLM-6E56CF)
 
-```
-上传 PDF ─► 阶段 A（侦察）：Agent 自主决定读哪几页 ─► 3-5 条核心创新点
-                                              ├─ 每条带页码 + 原文引用
-                                              ├─ 引用被后端逐条机械核验（编的会被打回重做）
-                                              └─ 带 search_hints，供阶段 B 到代码里搜索
-        ─► 你在页面上勾选想深入哪几条 ─► 阶段 B（定位）：浅克隆仓库 → Agent 自主探索
-                                              ├─ 每条结论带 path + 行号区间 + why
-                                              ├─ snippet_sha256 由后端从 git 对象里算出来
-                                              ├─ verify.py 重放核验 → citation_verifiable_rate
-                                              └─ 找不到就写 not_found（附搜过什么）
-```
+---
 
-## 这个项目的两条底线
+## 为什么做这个
 
-1. **引用必须可机械核验**：每条代码引用都带 `commit_sha / path / 行号区间 / 片段 hash`，
-   后端会重放校验（`verify.py`）。头号指标是 `citation_verifiable_rate`，不是"读起来像不像"。
-2. **找不到就说找不到**：`not_found` 是合格输出，不是失败。
+读论文配代码时，最耗时的往往不是“听一段泛泛的总结”，而是建立精确对应：**论文第 3 节的那个公式或模块，到底落在仓库哪个文件、哪几行？**
 
-## 评估数字
+通用对话模型很容易写出“看起来很懂”的解读，但你很难判断它有没有编造页码、行号或函数。Paper2code 把**可核验性**做成系统底线：
 
-这一节是**这个项目最该被认真看的地方**：一个"看起来很懂"的解读很容易做，难的是知道它有多准。
+- **论文侧**：每条引文都会校验是否真实出现在指定页；只匹配到开头时如实标为「部分匹配」。
+- **代码侧**：每条代码引用锚定到锁定 `commit_sha`、文件路径、行区间与归一化片段哈希（`snippet_sha256` 由后端从 `git show` 对象计算，模型无权提供），后端随时可重放核验。
+- **诚实性**：`not_found` 是合格输出而非失败，必须附上判断依据与已搜索记录。
 
-| 指标 | mock（脚本化理想 Agent） |
-|---|---|
-| 创新点清单召回（plan recall） | 100% |
-| 创新点清单准确（plan precision） | 100% |
-| 文件级召回（file recall） | 100% |
-| 文件级准确（file precision） | 100% |
-| 符号级召回（symbol recall） | 100% |
-| **引用可核验率** | 100% |
-| 诚实报「未找到」 | 100% |
-| 引用总数 / 通过核验 | 2/2 |
-| 工具调用总数 / 总用时（定位阶段） | 7 次 / 1.4s |
+定位是**帮人快速建立算法与代码之间的对应关系**，不预设阅读背景。
 
-> ⚠️ 这一行是**离线模式**：模型行为由 `devtools/mock_provider.py` 脚本化，用来验证评估链路与指标定义本身，**不代表真实模型的能力**。
-> 真实数字请用 `--provider real` 跑你自己的模型。
+---
 
+## 核心特性
 
-**怎么读这张表**：`file_recall` 问的是"论文的创新点，它有没有在正确的文件里找到"；
-`citation_verifiable_rate` 问的是"它给出的每一条代码引用，是不是真的能在那个 commit 的那些行里找到"
-（由后端从 git 对象重放核验，不依赖任何模型判断）；"诚实报未找到"问的是"仓库里确实没有实现时，它会不会编一个出来"。
+- **两阶段自主 Agent 工作流**
+  - **阶段 A（侦察）**：仅读论文，提炼 3–5 条核心创新点，每条附页码、已核验原文引文与代码搜索线索（`search_hints`）。
+  - **阶段 B（定位）**：源码视图浅克隆仓库，逐条定位实现，产出带证据锚点与解释（直觉、公式、逐段讲解、易错点、延伸阅读）的结论。
+  - **人工可控介入**：两阶段之间可自由勾选、改名、删除目标，也可直接在论文原文中划选任意片段新增为自定义定位目标。
+- **双栏对照阅读器**
+  - **左栏（论文）**：默认使用本地 PDF.js 渲染原版画布与官方可选文字层，保留公式/图表原貌，支持直接划选添加目标、页码直跳、多档无闪烁缩放（100%–200%）及跨行引文多矩形高亮；渲染异常时自动回退至服务端 PNG，并保留「原文文本」备用视图。
+  - **右栏（代码）**：Prism 多语言语法着色，引用行高亮并支持一键「回到引用行」与「复制位置」；AI 逐段讲解按行号直接嵌入代码行前，明确标示「AI 讲解 · 非仓库原文」。
+  - 阅读器顶栏支持直接切换上一条 / 下一条创新点，减少长页来回滚动。
+- **可核验追问对话 & 数学公式排版**
+  - 可针对当前创新点或整篇论文继续追问，Agent 可按需重新检索论文、代码与更早对话记录（每条消息独立 8 次工具预算）。
+  - 回答中出现的每个 `文件:行号` 都会由后端拿去 git 对象核对，未通过的直接标红。
+  - 解释与追问内置安全的 `react-markdown` + `KaTeX` 数学渲染（支持 `\(...\)`、`\[...\]`、`$...$`、`$$...$$` 与裸公式字段），流式闭合即渲染，禁 raw HTML 与受信任宏执行。
+- **本机历史解读与换模型续问**
+  - 所有解读自动保存到本机（含部分完成、失败与中断记录），支持在 `/history` 按标题/文件名搜索、按状态筛选、分页浏览与两步确认删除。
+  - 刷新页面或重新打开历史不需要原密钥、也不会重跑旧阶段；更换来源、模型或解析语言（简体中文 / English）后可基于已有结论与对话继续追问，旧结论保持不变。
+  - 同标签页刷新未完成解读不误锁只读，未完成历史也支持手动解锁继续完善定位。
+- **可观测行动轨迹 & 外观定制**
+  - 统一 SSE 事件流实时展示中文工具名、参数摘要、耗时、限流等待与预算提醒，运行中支持随时停止。
+  - 顶部支持手动切换**系统 / 浅色 / 深色**外观主题。
+- **BYOK（自带密钥）与运行治理**
+  - 支持任意 OpenAI 兼容端点（OpenAI、DeepSeek、Moonshot、OpenRouter、SiliconFlow、vLLM、Ollama、one-api 等）及 Anthropic；协议差异仅封装在 `backend/app/providers.py`。
+  - 内置两轮工具调用启动自检，提前拦住不支持可靠 function calling 的模型并给出可读诊断。
+  - 具备工具次数/token/墙钟预算护栏、60%/85% 预算提醒（促模型边搜边交）、响应头/话术限流自适应、瞬时故障退避重试与**失败也交付已核验部分**机制。
+- **仓库访问硬化**
+  - 仅允许 `https://` 与域名白名单，三层地址判定兼容 TUN / fake-ip 代理与企业内网；部分克隆 + 稀疏检出（`--filter=blob:none --sparse`）只取源码视图；禁用 hooks、submodule、LFS 与符号链接，**绝不执行仓库内任何代码**。
 
-### 标注纪律（比数字本身更重要）
+---
 
-gold set 是一张**标准答案表**（`backend/eval/goldset.yaml`）。要让上面的数字有意义，必须守住三条：
+## 工作原理
 
-1. **先标注、后运行**：人工读完论文和代码、写下 `must_find_files` 并**冻结 repo 的 commit**，之后才允许跑系统。
-   先跑系统再回头补标注 = 数据污染，数字会骗自己。
-2. **commit 必须冻结**：仓库每天都在变，不钉死 commit 的指标没有意义。
-   评估会按完整的 40 位小写 SHA 检出，交付后再核对；HEAD 前进不需要重新标注，冻结提交取不到或实际版本不符则不计分。
-3. **gold set 只看一次**：想边跑边改 prompt，请另开"调参集"；gold set 封存到出报告那一刻。
-
-### 你自己跑一遍
-
-```bash
-cd backend
-# 离线：验证评估链路本身（不花钱，用脚本化的"理想 Agent"）
-.venv/bin/python -m eval.run_eval
-
-# 真实：用你自己的模型 + 真实论文与仓库
-PAPER2CODE_EVAL_BASE_URL=https://api.deepseek.com/v1 \
-PAPER2CODE_EVAL_API_KEY=sk-xxx \
-PAPER2CODE_EVAL_MODEL=deepseek-chat \
-.venv/bin/python -m eval.run_eval --provider real --label "DeepSeek-V3"
+```mermaid
+flowchart LR
+    P["论文 PDF"] --> A["阶段 A · 侦察<br/>Agent 只读论文"]
+    A --> L["创新点清单<br/>页码 + 原文引文（已核验）"]
+    L --> S{"勾选 / 划选<br/>自定义目标"}
+    R["仓库地址"] --> B
+    S --> B["阶段 B · 定位<br/>源码视图克隆 + 只读工具"]
+    B --> F["结论<br/>commit · 路径 · 行号 · 片段哈希"]
+    F --> V["verify.py<br/>从 git 对象重放核验"]
+    V --> U["双栏对照 + 追问 + 本机历史"]
 ```
 
-真实论文按 `goldset.yaml` 里的模板另建标注集（PDF 放到 `backend/eval/pdfs/`），用
-`--goldset eval/goldset-real.yaml --only lora` 先跑一篇，再去掉 `--only` 跑全量。默认标注集仍是合成夹具。
-
-- 真实模式尊重环境变量与 `backend/.env` 的限流配置，例如 `PAPER2CODE_LLM_MAX_REQUESTS_PER_MINUTE=10`。
-- 离线报告写 `backend/eval/report.json` / `.md`；真实报告写 `backend/eval/reports/<时间>-<标签>-<随机标识>.json` / `.md`，不会被 m4 验收覆盖。真实报告默认不进 git，发布前请检查端点地址和错误信息。
-- 每篇处理完立即保存；失败或版本无效的篇目单列、不进效果汇总，其余继续跑，整轮退出码为 1。已交付的部分结果仍评分，但明确标记 `partial`。表格同时列出已评分/已尝试篇数，未完成的整轮还会注明进度。
-- 报告记录两阶段的结束原因、token 与耗时，失败篇目的已知消耗也纳入总用量；未知用量不会记成零。输入 token 优先取端点值、缺失时估算，输出 token 为文本估算，不是账单。
-- `--phase-timeout` 默认每阶段 1800 秒；超时/断流会尝试取消任务，取消失败会留痕。`--force` 只用于诊断，不会让版本无效的结果计分。
-
-审核真实报告后再把表格贴到这一节。**离线那一行永远只是基线，不要拿它当项目效果。**
-
-旧的 `PAPERLENS_*` 配置仍兼容；同一来源中新 `PAPER2CODE_*` 名字优先，环境变量优先于 `.env`。浏览器设置会迁移，不改变用户是否记住密钥的选择。
-
-追问的 `finish` 只结束资料查阅，随后生成完整正文；失败或取消会标明未完整交付。PDF 阅读器使用本地 PDF.js 文字层，支持原版划选；扫描页不伪装成可选文本，不内置 OCR。
-
-页面顶部可选择**解析语言**（默认简体中文，也可选 English），浏览器会记住选择。设置影响后续侦察、代码逐段讲解与追问，不自动翻译已有结果；论文引文、代码标识符和引用路径保留原文。自动 PDF 高亮只定位同一次引用，不把不同栏或重复出现的片段拼起来；匹配不全时按实际显示的字符比例报告覆盖率。
-
-### 历史解读与换模型续问
-
-右上角的**历史记录**进入本机历史列表，可按论文标题或文件名搜索、分页查看。上传后的解读自动保存，包括部分完成、失败和中断的记录；刷新页面或重启项目后，可用 `/?run=<run_id>` 重新打开。加载历史只读取本机材料，不需要原供应商、密钥或模型自检，也不会自动重跑任务。
-
-历史页面保留创新点、代码解释、PDF 引用和完整对话。在**后续追问的模型**中更换来源、协议、模型和解析语言后，新模型会读取已有解读与近期对话，也可通过只读工具查阅更早的消息；旧结论保持不变，新回答追加到同一份记录并标注模型来源。切换端点或协议会清空旧密钥，任何模型配置修改都会撤销旧自检结果。密钥仍只在明确勾选后保存到浏览器，不写进历史。
-
-本次历史模式支持回看和续问，不提供重新侦察、追加定位、编辑旧创新点或跨机器导入导出。关闭网页后，已提交的后台任务继续运行；后端进程中断后保留已保存的进展并显示中断状态，不自动重发模型请求。论文或仓库丢失时显示具体提示，仍可阅读已经保存的解读；损坏文件不会自动覆盖或伪装成成功。
-
-数据位于 `PAPER2CODE_DATA_DIR`（默认 `backend/data`），继续使用每次运行的 PDF、plan、artifact、chat、events 与 repo 文件；新增 `history.json` 保存轻量索引和操作状态。旧记录在首次读取时生成索引。`backend/scripts/dev_services.sh clean` 现在仅清理可再生的 PDF 缓存，保留全部历史及所需仓库。代码阅读与追问工具统一读取历史绑定的 commit；浅克隆中缺失的 Git 对象仍可能需要访问原仓库，历史保存不是完整离线仓库归档。
-
-离线回归：`cd backend && timeout 60 .venv/bin/python -m unittest tests.test_history tests.test_reader_repository`；前端执行 `pnpm test`，启动本地假端点与测试服务后执行 `pnpm test:browser`。这些测试不调用付费模型。
-
-## 环境要求
-
-- **Python 3.11+**（必须。`litellm` 用了 3.11 才有的 `typing.NotRequired`，3.10 会直接 ImportError）
-- Node.js 22.13+（前端，M3 开始用）
-
-本机没有 3.11+ 的话，用 [uv](https://docs.astral.sh/uv/) 装一个（推荐，不需要 sudo）：
-
-```bash
-pip install uv          # 或 curl -LsSf https://astral.sh/uv/install.sh | sh
-uv python install 3.12
+```mermaid
+flowchart LR
+    subgraph FE["前端 · Next.js 16 / React 19 / Tailwind 4"]
+        UI["创新点目录 · PDF.js/Prism 阅读器 · KaTeX 追问 · 行动轨迹 · 历史页"]
+    end
+    subgraph BE["后端 · FastAPI"]
+        API["REST + 统一 SSE 事件流"]
+        LOOP["Agent 工具循环<br/>预算 · 边搜边交 · 早停 · finalize"]
+        TOOLS["论文工具 / 仓库工具 / 历史工具<br/>record_plan · record_finding"]
+        VERIFY["机械核验<br/>引文匹配 · verify.py"]
+        REPO["repo_source.py<br/>地址判定 · 源码视图克隆 · 路径守卫"]
+    end
+    LLM[("OpenAI 兼容端点 / Anthropic<br/>经 LiteLLM")]
+    HOST[("GitHub / GitLab")]
+    UI -->|"HTTP · SSE"| API
+    API --> LOOP
+    LOOP -->|"BYOK"| LLM
+    LOOP --> TOOLS
+    TOOLS --> VERIFY
+    TOOLS --> REPO
+    REPO -->|"git clone --filter=blob:none --sparse"| HOST
 ```
+
+三条贯穿始终的设计原则：
+
+1. **后端不做决策**：后端不做分节、不做 AST、不做公式 OCR，只提供原子只读工具与确定性校验；读哪页、搜什么、何时收敛由 Agent 自主决定。
+2. **结构化提交走工具**：`record_plan` 与 `record_finding` 都是工具调用，支持实时增量推送与具体打回重写，避免最后吐大段 JSON 解析失败。
+3. **一个 run 一条事件总线**：侦察、定位、追问复用同一条 SSE 流（`Last-Event-ID` / `from_id` 续传），`run_end` 永远是最后一条事件。
+
+### 可核验性的边界
+
+| 对象 | 核验方式 | 能证明 | 不能证明 |
+|---|---|---|---|
+| 论文引文 | 忽略空白差异核对是否出现在指定页（仅开头匹配标为「部分匹配」） | 原文确实出现在该页 | 该句足以支撑模型推论 |
+| 代码引用 | 从 `git show <commit>:<path>` 提取行区间，归一化重算 `snippet_sha256` | 引用指向该 commit 真实存在的代码行 | 这些行在语义上完整实现了该公式 |
+| 追问 `文件:行号` | 自动抽取并逐条查 git 对象核对存在性与行范围 | 代码位置真实存在 | 回答本身推理完全正确 |
+
+语义正确性由解释字段、置信度与人工对照复核共同承担；界面上将「引用已核验」与「置信度」明确分开展示。
+
+---
 
 ## 快速开始
 
-### 后端
+### 环境要求
+
+- **Python ≥ 3.11**（推荐 3.12，`litellm` 依赖 3.11+ 的 `typing.NotRequired`）
+- **Node.js ≥ 22.13** 与 **pnpm**
+- **git ≥ 2.25**（支持 `--filter=blob:none` 与稀疏检出）
+- 辅助脚本基于 bash，推荐在 Linux 或 WSL 下运行
+
+没有 Python 3.12 时可用 [uv](https://docs.astral.sh/uv/) 零侵入安装：
 
 ```bash
-cd backend
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv python install 3.12
+```
 
+### 1. 安装依赖
+
+```bash
+git clone https://github.com/Anatkhior/Paper2Code.git
+cd Paper2Code
+
+# 后端
+cd backend
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python -r requirements.txt
 
-# 离线验收：不需要任何真实 API key，会自己拉起 mock provider 跑完整链路
-.venv/bin/python -m scripts.m0_check   # M0 回归（36 项）
-.venv/bin/python -m scripts.m1_check   # M1 阶段 A（162 项）
-.venv/bin/python -m scripts.m2_check   # M2 阶段 B（174 项）
-.venv/bin/python -m scripts.m3_check   # M3 对照界面 + 前端构建渲染（61 项；跑前先停掉 next dev）
-.venv/bin/python -m scripts.m4_check   # M4 gold set + 指标自检 + README 一致性（48 项）
-.venv/bin/python -m scripts.m6_check   # v1② 划选→定位目标（61 项；跑前先停掉 next dev）
-.venv/bin/python -m scripts.m7_check   # v1③ 追问对话（43 项；跑前先停掉 next dev）
-
-# 或者一键全跑（推荐）
-./scripts/run_all_checks.sh
-
-# 启动服务
-.venv/bin/python -m uvicorn app.main:app --reload --port 8000
-```
-
-打开 http://127.0.0.1:8000/docs 可以直接在浏览器里试接口。
-
-### 前端
-
-```bash
-cd frontend
+# 前端
+cd ../frontend
 pnpm install
-pnpm dev            # http://localhost:3000
 ```
 
-前端默认连 `http://127.0.0.1:8000`，要改就复制 `.env.local.example` 成 `.env.local`。
+### 2. 零成本试用（无需 API Key）
 
-AI 讲解与追问使用 KaTeX 渲染数学公式：支持 `\(...\)`、`\[...\]`、`$...$`、`$$...$$`，历史记录也会自动渲染。代码示例保持原文；流式公式在分隔符闭合后渲染，语法错误或不支持的命令保留可见错误，不会中断其余回答。长公式可横向滚动，字体由项目本地提供。渲染器不执行模型输出的 HTML，也不启用 KaTeX 的受信任 HTML/外部资源命令。
-
-### 零成本试用（推荐第一次这样跑）
-
-不用任何真实 API key：先起一个本地假端点，它会扮演一个"听话的模型"（读论文 → 交清单），
-把你真正想验证的东西（工具调用、事件流、引文核验、UI）全部跑一遍。
+项目内置本地假端点 `devtools/mock_provider.py` 与自洽合成夹具，可零成本跑通完整链路：
 
 ```bash
 cd backend
-.venv/bin/python -m uvicorn devtools.mock_provider:app --port 8123
+
+# 首次使用：生成合成论文 PDF 与合成代码仓库
+.venv/bin/python -m tests.paper_fixture
+.venv/bin/python -m tests.repo_fixture
+
+# 一键启动：后端(8000，已开启本地仓库开关) + 假端点(8123) + 前端(3000)
+./scripts/dev_services.sh start
 ```
 
-然后在网页上填：`base_url = http://127.0.0.1:8123/v1`、`api_key = mock-key`、`model = mock-model`
-→ 点「运行自检」→ 上传 `backend/tests/fixtures/synthetic_paper.pdf` → 开始侦察 → 勾选创新点
-→ 仓库地址填 `backend/tests/fixtures/sample_repo` 的**绝对路径**（需要后端带
-`PAPER2CODE_ALLOW_LOCAL_REPO_PATHS=true` 启动）→ 开始定位，看完整的引用核验）。
+在浏览器打开 **http://localhost:3000**（开发模式请用 `localhost` 而非 `127.0.0.1`，避免 Next.js HMR 跨源拦截）：
 
-没有那个开关时，仓库地址必须是 https 的 github.com / gitlab.com 地址。
+1. **模型设置**：`base_url` 填 `http://127.0.0.1:8123/v1`、`api_key` 填 `mock-key`、`model` 填 `mock-model`，点击「运行自检」。
+2. **上传论文**：拖入或选择 `backend/tests/fixtures/synthetic_paper.pdf`，点击「上传并开始侦察」。
+3. **调整目标**：勾选创新点，或直接在「PDF 原版」上划选任意一段添加自定义目标。
+4. **定位代码**：仓库地址填 `backend/tests/fixtures/sample_repo` 的**绝对路径**，点击「开始定位」。
+5. **对照与追问**：在双栏阅读器查看原文高亮、代码与行内 AI 讲解，继续追问或前往「历史记录」体验恢复与换模型续问。
 
-想看真实效果就把 provider 换成你自己的（DeepSeek / OpenAI / Anthropic / 本地 Ollama 都行），
-上传一篇真论文。**先跑自检**：它会替你把"这个模型到底能不能用"这件事判定掉。
+常用服务管理命令：
 
-### 自带 key（BYOK）
+```bash
+./scripts/dev_services.sh status        # 查看三服务状态（带健康检查）
+./scripts/dev_services.sh logs backend  # 查看日志（backend | mock | frontend）
+./scripts/dev_services.sh stop          # 停止全部服务
+./scripts/dev_services.sh clean         # 仅清理可再生 PDF 缓存，保留全部历史与仓库
+```
 
-不写死任何服务商。前端/请求里传这三个字段即可，支持任何 OpenAI 兼容端点
-（OpenAI、DeepSeek、Moonshot、Groq、OpenRouter、vLLM、Ollama、one-api 网关…）以及 Anthropic：
+<details>
+<summary>手动分别启动三个服务</summary>
+
+```bash
+# 终端 1：后端（PAPER2CODE_ALLOW_LOCAL_REPO_PATHS 仅用于本地测试/演示）
+cd backend
+PAPER2CODE_ALLOW_LOCAL_REPO_PATHS=true .venv/bin/python -m uvicorn app.main:app --port 8000
+
+# 终端 2：本地假端点
+cd backend
+.venv/bin/python -m uvicorn devtools.mock_provider:app --port 8123
+
+# 终端 3：前端
+cd frontend
+pnpm dev
+```
+
+后端启动后可访问 http://127.0.0.1:8000/docs 查看并调试 Swagger 接口。
+
+</details>
+
+### 3. 接入你自己的模型（BYOK）
+
+在「模型设置」选择预设（OpenAI / DeepSeek / Anthropic / 本地 Ollama）或手动填写：
 
 ```json
 {
@@ -197,7 +210,9 @@ cd backend
 }
 ```
 
-**上手前先跑自检**，它会替你判断这个模型能不能用：
+- **强烈建议先跑自检**：本项目完全依赖可靠的 function calling，自检会在两轮工具调用内确认端点可用性并输出清晰诊断。
+- 模型名本身包含 `/`（如 OpenRouter 的 `anthropic/claude-...`、SiliconFlow 的 `Qwen/Qwen2.5-72B-Instruct`）在填写 `base_url` 时会原样发往端点；仅在未填 `base_url` 时按 LiteLLM 原生前缀路由。
+- 也可直接用命令行调用自检接口：
 
 ```bash
 curl -s http://127.0.0.1:8000/api/provider/smoke-test \
@@ -205,104 +220,243 @@ curl -s http://127.0.0.1:8000/api/provider/smoke-test \
   -d '{"protocol":"openai-compatible","base_url":"https://api.deepseek.com/v1","api_key":"sk-...","model":"deepseek-chat"}'
 ```
 
-自检会给出人话结论，例如"该端点没有返回工具调用（tool_calls）……无法在这样的模型上工作"。
-**本项目完全依赖可靠的 function calling**，不支持工具调用的模型必须在这里被拦住，而不是产出垃圾。
+---
 
-> 兼容性备注：个别套了 Cloudflare 的第三方网关会**按 User-Agent 把 Python SDK 的请求当 bot 直接 403**
-> （2026-09-13 实测某中转站：同 key 同请求体，SDK UA → 403 HTML，自定义 UA → 正常）。
-> Paper2code 的 LLM 请求默认带自定义 UA `Paper2code/0.1` 来避开；若你的网关仍拦，设
-> `PAPER2CODE_HTTP_USER_AGENT=任一浏览器UA` 后重启后端再自检。自检失败时会把这个开关写进诊断提示。
+## 配置项
 
-### 接口一览（M0）
+后端配置通过 `PAPER2CODE_` 前缀环境变量或 `backend/.env` 提供（兼容旧 `PAPERLENS_` 前缀，进程环境变量优先于 `.env`）。**修改后需重启后端**；列表类变量兼容逗号分隔与 JSON 数组。
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `PAPER2CODE_DATA_DIR` | `data` | 运行数据目录，每个 run 独立子目录 |
+| `PAPER2CODE_MAX_TOOL_CALLS` | `40` | 单个阶段（侦察/定位）工具调用上限 |
+| `PAPER2CODE_MAX_INPUT_TOKENS` | `1500000` | 单个阶段累计输入 token 上限 |
+| `PAPER2CODE_WALL_CLOCK_SECONDS` | `600` | 单个阶段墙钟超时（秒） |
+| `PAPER2CODE_CHAT_MAX_TOOL_CALLS` | `8` | 每条追问消息的工具调用上限 |
+| `PAPER2CODE_CHAT_MAX_INPUT_TOKENS` / `PAPER2CODE_CHAT_WALL_CLOCK_SECONDS` | `400000` / `180` | 每条追问消息的 token 与时长上限 |
+| `PAPER2CODE_PER_TURN_TIMEOUT_SECONDS` | `180` | 单次 LLM 请求超时（秒） |
+| `PAPER2CODE_LLM_MAX_REQUESTS_PER_MINUTE` | `0` | 客户端主动节流；`0` 表示撞 429 或读到响应头后自适应 |
+| `PAPER2CODE_LLM_MAX_RETRIES` | `5` | 限流或瞬时故障最大重试次数 |
+| `PAPER2CODE_HTTP_USER_AGENT` | `Paper2code/0.1` | LLM 与探测请求 UA（规避部分 Cloudflare 拦截 SDK 默认 UA） |
+| `PAPER2CODE_MAX_UPLOAD_MB` / `PAPER2CODE_MAX_PAGES` | `50` / `50` | PDF 体积与页数上限 |
+| `PAPER2CODE_REPO_ALLOWED_HOSTS` | `github.com,gitlab.com` | 仓库域名白名单，支持 `host:port` |
+| `PAPER2CODE_REPO_CLONE_TIMEOUT_SECONDS` | `300` | 克隆超时（秒） |
+| `PAPER2CODE_REPO_MAX_MB` | `200` | 克隆后工作区 + 对象库总磁盘上限（MB） |
+| `PAPER2CODE_REPO_SPARSE` / `PAPER2CODE_REPO_SPARSE_EXCLUDE` | `true` / 空 | 源码视图稀疏克隆开关及追加排除规则（如 `!data,!/docs/assets`） |
+| `PAPER2CODE_REPO_NETWORK_MODE` | `local` | `local` 单机模式兼容代理占位符；`hosted` 公网模式严格核验 |
+| `PAPER2CODE_REPO_ALLOW_CIDRS` | 空 | 显式信任网段（如 `10.20.0.0/16`） |
+| `PAPER2CODE_REPO_DNS_CROSSCHECK` | `auto` | 公网 DoH 交叉核验开关（`auto` 仅在 `hosted` 模式下启用） |
+| `PAPER2CODE_ALLOW_LOCAL_REPO_PATHS` | `false` | 允许克隆本地目录（**仅限测试/演示，公网部署严禁开启**） |
+| `PAPER2CODE_CORS_ORIGINS` | `["http://localhost:3000","http://127.0.0.1:3000"]` | 前端来源白名单 |
+
+前端配置仅有 `NEXT_PUBLIC_API_BASE`（默认 `http://127.0.0.1:8000`），可复制 `frontend/.env.local.example` 为 `.env.local` 修改后重新构建。
+
+---
+
+## API 概览
+
+完整交互文档可在后端运行后访问 `/docs`。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/api/health` | 健康检查 + 当前预算上限 |
-| POST | `/api/provider/smoke-test` | 启动自检（两轮工具调用，判定模型能不能用） |
-| POST | `/api/runs` | multipart 上传 PDF + provider 配置，返回 `run_id` |
-| GET | `/api/runs?q=&offset=0&limit=20` | 本机历史列表、标题/文件名搜索与分页 |
-| GET | `/api/runs/{id}/snapshot` | 一致的历史快照、资源可用性与事件游标 |
-| GET | `/api/runs/{id}/trace?before=<event_id>` | 分页读取更早的行动轨迹 |
+| GET | `/api/health` | 健康检查、预算上限与当前生效的限流节奏 |
+| POST | `/api/provider/smoke-test` | 两轮工具调用启动自检与失败诊断 |
+| POST | `/api/runs` | multipart 上传 PDF、provider 与 `output_language`，返回 `run_id` |
+| GET | `/api/runs` | 本机历史列表，支持 `?q=` 搜索、`?status=` 状态筛选与 `offset`/`limit` 分页 |
+| DELETE | `/api/runs/{id}` | 删除一条非运行中的本机历史记录（运行中返回 409） |
+| GET | `/api/runs/{id}/snapshot` | 获取一致的历史快照、资源可用性、近期事件与游标 |
+| GET | `/api/runs/{id}/trace` | 分页加载更早的行动轨迹（`?before=<event_id>`） |
 | POST | `/api/runs/{id}/recon` | 启动阶段 A（侦察），产出创新点清单 |
-| POST | `/api/runs/{id}/locate` | 阶段 B：对勾选的创新点做代码定位 + 引用核验 |
-| GET/POST/PATCH/DELETE | `/api/runs/{id}/plan/items…` | 用户自己指定/编辑定位目标（在原文里划选） |
-| POST | `/api/runs/{id}/chat` | 追问一句（它会自己决定要不要去查代码/论文） |
-| GET | `/api/runs/{id}/chat` | 取回对话记录（刷新页面恢复） |
-| GET | `/api/runs/{id}/events` | 所有阶段的统一 SSE 事件流（`Last-Event-ID` 断线重连） |
-| GET | `/api/runs/{id}` | 事件历史与产物（刷新页面回放） |
-| GET | `/api/runs/{id}/file` | 读某个 commit 上的一段代码（点开引用看原文） |
-| GET | `/api/runs/{id}/paper/page/{n}` | 读论文某一页原文；带 `?quote=` 时同时返回该引文的高亮矩形与页面尺寸（原版页面视图用它画框） |
-| GET | `/api/runs/{id}/paper/page/{n}/image` | 该页的渲染图（PNG，`?dpi=` 可调）：原版页面不内嵌 PDF 阅读器，而是「渲染图 + 自己叠高亮框」 |
-| POST | `/api/runs/{id}/cancel` | 取消运行 |
+| GET | `/api/runs/{id}/plan` | 读取服务端创新点清单（含用户自定义目标） |
+| POST / PATCH / DELETE | `/api/runs/{id}/plan/items[/{item_id}]` | 增删改自定义定位目标 |
+| POST | `/api/runs/{id}/locate` | 启动阶段 B（定位与核验）；可选 `commit`（40 位小写 SHA）固定版本 |
+| GET / POST | `/api/runs/{id}/chat` | 读取对话记录 / 发起追问（支持切换模型与解析语言） |
+| GET | `/api/runs/{id}/events` | 统一 SSE 事件流，支持 `Last-Event-ID` / `?from_id=` 续传 |
+| GET | `/api/runs/{id}` | 读取事件历史与最新产物 |
+| GET | `/api/runs/{id}/file` | 从锁定 commit 的 git 对象读取代码片段与上下文 |
+| GET | `/api/runs/{id}/pdf` | 原样透传上传的 PDF |
+| GET | `/api/runs/{id}/paper/page/{n}` | 读取单页原文；带 `?quote=` 时返回旋转后坐标的高亮矩形与覆盖率 |
+| GET | `/api/runs/{id}/paper/page/{n}/image` | 服务端渲染单页 PNG（PDF.js 失败时的自动回退源） |
+| POST | `/api/runs/{id}/cancel` | 停止当前运行中的阶段 |
 
-## 隐私与安全
+---
 
-- 你的 `api_key` **只在请求体里出现**：不落库、不写日志、不进错误堆栈（`ProviderConfig` 里已标记 `repr=False`）。
-- 论文与代码内容一律当作**不可信数据**：其中出现的任何"指令"都不生效（prompt injection 防线）。
-- 克隆用户提供的仓库已按 §10 硬化：https + 域名白名单（github.com / gitlab.com，可加别的托管站）
-  + 地址判定（拒绝回环/链路本地等 SSRF 靶子；挂代理/内网镜像的用户按 §10 的三层判据放行）
-  + 浅克隆并禁 hooks/submodule/LFS + 体积与超时上限 + **绝不执行仓库里的任何代码**。
-- 引用不是模型说了算：`snippet_sha256` 由后端从 `git show` 的对象里算，事后改代码骗不过核验。
+## 评估数字
 
-### 仓库地址的判定（报「解析到了内网地址」时先看这里）
+评估指标全部由确定性纯函数（`backend/app/eval_metrics.py`）从产物统计得出，不引入第二个模型打分，且验收脚本会用手工构造的“答错产物”验证指标确实会掉分。
 
-守卫不再拿"本机 DNS 的答案"一票否决：挂 TUN + fake-ip 代理（Clash/Mihomo/sing-box/Surge）或
-公司分流 DNS 时，本机解析到的地址只是**代理的占位地址**，不是目的地。默认 `local` 模式
-（单机自用）只拒绝回环/链路本地/组播这类绝不可能是托管站的地址，其它非公网解析结果
-**只提示不阻断**（提示会显示在时间线上）。
+| 指标 | mock（脚本化理想 Agent） | 真实模型 + 真实论文 |
+|---|---|---|
+| 创新点清单召回（`plan_recall`） | 100% | 待补充 |
+| 创新点清单准确（`plan_precision`） | 100% | 待补充 |
+| 文件级召回（`file_recall`） | 100% | 待补充 |
+| 文件级准确（`file_precision`） | 100% | 待补充 |
+| 符号级召回（`symbol_recall`） | 100% | 待补充 |
+| **引用可核验率（`citation_verifiable_rate`）** | **100%**（2/2） | 待补充 |
+| 诚实报「未找到」（`honest_not_found_rate`） | 100% | 待补充 |
 
-| 你的情况 | 怎么办 |
-|---|---|
-| 挂 Clash/Mihomo 等 TUN 代理，提示解析到 `198.18.x.x` | 默认已放行，无需配置 |
-| 公司内网 GitLab / 内网镜像 | 白名单加域名 `PAPER2CODE_REPO_ALLOWED_HOSTS=github.com,gitlab.com,git.corp`（非 443 写 `git.corp:8443`）；解析到内网的再用 `PAPER2CODE_REPO_ALLOW_CIDRS=10.20.0.0/16` 显式信任 |
-| 用 Gitee / Bitbucket / GitHub Enterprise | 同上，把这些域名加进 `PAPER2CODE_REPO_ALLOWED_HOSTS` |
-| 企业代理要求 git 走代理 / 自签 CA | `local` 模式默认**继承**你的 `~/.gitconfig`（`http.proxy` / `http.sslCAInfo` 都生效） |
-| 公网多租户部署 | 设 `PAPER2CODE_REPO_NETWORK_MODE=hosted`（严格判定 + 公网 DoH 交叉核验），并**另外做网络层隔离**：进程内的 DNS 检查不是安全边界 |
-| 仓库里有大体积演示视频/数据集，不想全下载 | 默认就只取**源码视图**（部分克隆 + 稀疏检出）：实测某个含 83MB 演示视频的仓库从 237MB 降到 2.3MB。想调整规则用 `PAPER2CODE_REPO_SPARSE_EXCLUDE=!*.bin,!/docs/assets`；想彻底关掉用 `PAPER2CODE_REPO_SPARSE=false` |
-| 提示"另有 N 个较大的二进制文件被下载了但工具不会读" | 照提示里给的 `PAPER2CODE_REPO_SPARSE_EXCLUDE=!*.xxx` 加上那条规则即可（冷门二进制格式没法预判，所以系统会点名） |
-| 结束原因是「工具调用次数达到上限 40」而**一条结论都没提交** | 以前模型不知道自己在烧最后一次机会（实测有一轮 40 次调用、0 条结论）。现在**边搜边交**：提示词要求证据够了就提交，并在用到 60% / 85% / 墙钟告急时注入「[预算提醒] 已用 24/40…立刻提交已确认的结论」，时间线上同样可见。想直接放宽：`PAPER2CODE_MAX_TOOL_CALLS=80`（配 `PAPER2CODE_WALL_CLOCK_SECONDS`）——但更该先解决的是「没提交」，不是「次数不够」 |
-| 跑着跑着报 `InternalServerError: Connection error.` 或 502/503 | 这是**瞬时故障**（网络抖动 / 代理不稳 / 中途站过载），现在会**自动退避重试**（5s 起跳），时间线显示「连接中断…重试中」。若重试后仍失败：重跑一次通常就好，反复出现就检查本机代理或换端点。**已定位并核验过的结论照常交付**，不会白跑 |
-| 跑着跑着报 `RateLimitError`（网关限流，如"1 分钟最多 10 次"） | 通常**不用配**：端点在响应头里声明了限额（`x-ratelimit-limit-requests: 10, 10;w=60`）就自动按那个节奏走；只说话术的也认（中英文都行）。想看当前生效的节奏：`GET /api/health` 的 `llm_pacing`，或跑一次自检（结论里会写「端点限额已识别（来自响应头）——每 6.0s 一次调用」）。要手动钉住就写 `PAPER2CODE_LLM_MAX_REQUESTS_PER_MINUTE=10` 再重启后端。**撞到 429 会自动退避重试**（时间线显示「端点限流，等待 Ns 后重试」）；**额度用尽/欠费不会重试**（直接告诉你重试无用）；**TPM（token/分钟）**会按 token 节流并建议减少上下文。**已定位到的结论不会丢**——失败也会交付并核验已确认的部分 |
+> ⚠️ 上表 `mock` 列为**离线基线**（脚本化假端点 + 合成夹具），仅用于验证评估链路与指标定义本身，**不代表真实模型能力**。
 
-环境变量用逗号分隔或 JSON 都行（`PAPER2CODE_REPO_ALLOWED_HOSTS=a,b` 是合法的）；
-改完**必须重启后端** —— 配置在导入时读取。
+### 标注纪律（`backend/eval/goldset.yaml`）
 
-## 目录结构
+1. **先标注、后运行**：人工通读论文与代码并写下 `must_find_files` / `expect_not_found`，**冻结 repo 的 40 位小写 `commit_sha`** 后才允许跑系统。
+2. **commit 必须冻结**：评估按冻结 commit 检出并在交付后核对版本；上游 HEAD 前进不影响旧标注，版本不符或检出失败不计入正式汇总。
+3. **gold set 只看一次**：调参改提示词请另建调参集，避免数据污染。
 
-```
-backend/app/providers.py           BYOK 唯一抽象层（协议差异只允许存在于此）+ 启动自检
-backend/app/agent/loop.py          Agent 工具循环（目标保持 ~200 行）
-backend/app/paper.py               PDF 读取层 + 引文核验（不含任何"理解"）
-backend/app/prompts.py             提示词（含不可信内容声明）
-backend/app/events.py              事件总线 + SSE（事件契约的实现）
-backend/app/main.py                FastAPI 端点
-backend/app/agent/tools/base.py    工具基类 + 截断 + 路径白名单
-backend/app/agent/tools/paper_tools.py   list_pages / get_page_text / search_paper / read_paper_all
-backend/app/repo_source.py         仓库访问层（§10 硬化全部在这里）
-backend/app/verify.py              确定性重放核验（citation_verifiable_rate 的来源）
-backend/app/agent/tools/repo_tools.py    repo_tree / search_code / read_file
-backend/app/agent/tools/findings.py      record_plan（阶段 A）+ record_finding（阶段 B）
-backend/devtools/mock_provider.py  本地假端点（离线验收 / 零成本试用）
-backend/scripts/harness.py         验收脚本公用件
-backend/scripts/m1_check.py        M1 验收脚本（80 项断言）
-backend/scripts/m2_check.py        M2 验收脚本（174 项断言）
-backend/tests/repo_fixture.py      合成测试仓库（内容自洽：有低秩实现、没有冻结主干）
-backend/tests/paper_fixture.py     合成论文 PDF（测试数据可复现）
-frontend/app/page.tsx              主页面：provider 表单 / 上传 / 仓库 / 清单 / 时间线 / 对照
-frontend/components/ComparePanel.tsx   论文证据 ↔ 代码引用的双栏对照
-frontend/components/TextViewer.tsx     点开看原文（代码按行高亮 / 论文整页）
-frontend/components/CoverageCard.tsx   覆盖率与预算
-frontend/components/Reader.tsx         双栏阅读器（左原文/右代码，划选可加为定位目标）
-backend/app/plan.py                    用户自定义定位目标（清单的可编辑状态）
-backend/app/chat.py                    追问对话（历史落盘 + 回答里的代码位置机械核对）
-frontend/components/ChatPanel.tsx      追问面板（显示"这次查了什么"与引用核验徽章）
-backend/scripts/dev_services.sh        一键起停三个开发服务（前端/后端/假端点）
-docs/v0-spec.md                    v0 规格（决策 / 范围 / schema / 安全 / 评估）
+### 运行评估
+
+```bash
+cd backend
+# 离线基线（零成本，更新 eval/report.json & report.md）
+.venv/bin/python -m eval.run_eval
+
+# 真实模型（输出到独立的 eval/reports/<时间>-<标签>-<随机标识>.json/.md，不覆盖基线）
+PAPER2CODE_EVAL_BASE_URL=https://api.deepseek.com/v1 \
+PAPER2CODE_EVAL_API_KEY=sk-... \
+PAPER2CODE_EVAL_MODEL=deepseek-chat \
+.venv/bin/python -m eval.run_eval --provider real --goldset eval/goldset-real.yaml --label "DeepSeek-V3"
 ```
 
-## 开发约定
+---
 
-- 依赖锁精确版本；升级依赖必须单独一次提交，并重跑 `m0_check` 和 gold set。
-- 工具必须能截断、必须有路径白名单、必须抛异常而不是把错误当内容返回。
-- 前端只能展示"可观测行动轨迹"（工具名、参数、结果摘要、阶段结论）——**不展示思维链**，
-  因为 OpenAI/Anthropic 的 API 不返回可展示的原始推理过程。
+## 测试与验收
+
+项目提供离线可复现的多层回归套件，验收脚本自动隔离临时 `PAPER2CODE_DATA_DIR`（不污染 `backend/data/`），使用专属端口 `8231/8232`：
+
+```bash
+# 1. 一键运行全部 7 个里程碑离线验收（共 621 项断言；跑前先停掉 next dev）
+cd backend && ./scripts/run_all_checks.sh
+
+# 2. 后端单元测试（53 项，pytest.ini 已配置限定 tests/）
+cd backend && .venv/bin/pytest -q
+
+# 3. 前端类型检查、Lint、行为单测（31 项）与生产构建
+cd frontend && pnpm exec tsc --noEmit && pnpm lint && pnpm test && pnpm build
+
+# 4. Playwright 浏览器端到端测试（需先运行 ./scripts/dev_services.sh start）
+cd frontend && pnpm test:browser
+```
+
+| 验收脚本 | 断言数 | 覆盖范围 |
+|---|---:|---|
+| `m0_check` | 38 | BYOK 抽象、启动自检诊断、自定义 UA、带 `/` 模型路由、SSE 回放与重启收尾 |
+| `m1_check` | 164 | 阶段 A 侦察、引文核验与打回、先连流再启动、限流退避与响应头识别、瞬时故障重试 |
+| `m2_check` | 194 | 阶段 B 定位、SSRF 三层判定矩阵、源码视图稀疏克隆、五类核验失败、预算提醒、冻结 commit |
+| `m3_check` | 54 | 代码/论文阅读端点、路径穿越、旋转/跨行 PDF 高亮矩形、前端构建与页面结构 |
+| `m4_check` | 54 | 指标可证伪性、gold set 卫生、真实评估路径离线回归、README 数字一致性 |
+| `m6_check` | 63 | 划选新增自定义目标、清单 CRUD 并发守卫、前端全部行为单测与构建产物检查 |
+| `m7_check` | 54 | 追问事件链、历史传参、单消息 8 次工具预算、回答内代码位置核对 |
+
+---
+
+## 安全与隐私
+
+- **密钥隔离**：`api_key` 只存在于请求体与内存中，不写磁盘、不写日志、不进错误堆栈（`repr=False`）；前端默认不持久化 key，仅在用户显式勾选后存于当前浏览器 `localStorage`，切换端点或协议时自动清空旧密钥。
+- **不可信数据防线**：论文、代码、README、注释与 `.gitattributes` 均视为不可信数据；三个系统提示词均带防注入声明，且结构性核验保证注入无法伪造代码引用。
+- **仓库访问硬化**：仅允许 `https://` 与域名白名单，拒绝 userinfo；克隆禁用 hooks、submodule、LFS 与符号链接（`core.symlinks=false`），读取/列目录/搜索均不跟随软链；绝不执行仓库内任何代码。
+- **部署边界**：本项目面向单机自用，无账号与多租户鉴权；若公网部署，除设置 `PAPER2CODE_REPO_NETWORK_MODE=hosted` 外，务必在外部补齐鉴权、配额与网络层隔离（容器 / netns / 防火墙）。
+
+---
+
+## 项目结构
+
+```text
+backend/
+  app/
+    main.py                FastAPI 全部端点（上传 / 历史 / 侦察 / 定位 / 追问 / 阅读 / SSE）
+    providers.py           BYOK 唯一抽象层：LiteLLM 调用、自检、限流学习与错误诊断
+    history.py             本机历史索引（history.json）、状态筛选、删除与快照恢复
+    agent/loop.py          Agent 工具循环：流式、预算提醒、原地打转早停、finalize 钩子
+    agent/tools/           论文工具、仓库工具、历史对话工具、record_plan / record_finding
+    paper.py / paper_highlight.py  PDF 读取、引文核验与几何序列高亮定位
+    repo_source.py         仓库访问层：地址判定、源码视图克隆、路径与软链守卫、搜索
+    verify.py              确定性重放核验（citation_verifiable_rate 来源）
+    plan.py / chat.py      可编辑创新点清单 / 追问对话与回答内代码位置核对
+    events.py / store.py   统一事件总线、SSE 与运行目录原子落盘
+    language.py / config.py / prompts.py / eval_metrics.py
+  devtools/mock_provider.py  本地假端点（限流、断流、HTML 错页、坏参数等多种变体）
+  scripts/                 m0–m7 验收脚本、harness.py、run_all_checks.sh、dev_services.sh
+  tests/                   合成论文/仓库夹具及历史、评估、PDF 几何、追问与阅读回归单测
+  eval/                    goldset.yaml、run_eval.py、离线基线 report.json / report.md
+  pyproject.toml           pytest 配置（限定 tests/，避免误扫 data/）
+frontend/
+  app/
+    page.tsx               主工作台：准备区、创新点目录与详情、常驻阅读器、追问与轨迹
+    history/page.tsx       本机历史解读：搜索、状态筛选、分页与删除
+    layout.tsx / globals.css / error.tsx
+  components/              Reader、PdfPage、PlanList、ComparePanel、ChatPanel、Timeline、
+                           CoverageCard、ProviderForm、Markdown、ThemeToggle、Icon、Evidence
+  lib/                     api、types、useRunSession、useReader、session、chatState、
+                           syntax、codeAnnotations、markdownMath、toolLabels、providerStorage
+  tests/browser/           Playwright 端到端回归（reader / history / math）
+docs/v0-spec.md            详细架构规格、schema、安全清单与里程碑设计
+```
+
+每次运行的数据保存在 `backend/data/<run_id>/` 下（`paper.pdf`、`meta.json`、`history.json`、`events.jsonl`、`plan.json`、`artifact.json`、`chat.jsonl` 及锁定 commit 的 `repo/`）。
+
+---
+
+## 已知限制与路线图
+
+**已知限制：**
+- 真实论文 + 真实模型的评估数字尚未产出，默认 gold set 目前仅有 1 对合成夹具。
+- 不支持扫描版 PDF（无内置 OCR），单篇上传上限 50MB / 50 页；暂不对架构图与公式做视觉模型理解。
+- 代码搜索为纯 Python 实现，结果顺序确定，但在超大型仓库上会受 4000 文件 / 8 秒预算限制（未扫完会如实标注）。
+- 暂不支持需要鉴权的私有仓库，以及多租户在线部署。
+
+**路线图：**
+- [ ] 使用真实论文与主流模型产出首批评估报告，扩充 `goldset`
+- [ ] 多条创新点并行定位
+- [ ] 支持将公式/架构图页图像输入多模态视觉模型
+- [ ] 多 provider 兼容性矩阵
+- [ ] 可选符号索引工具（tree-sitter）
+
+---
+
+## 常见问题
+
+<details>
+<summary>填了正常 GitHub 地址却报“解析到了内网/保留地址”</summary>
+
+通常是因为本机开启了 Clash / Mihomo / sing-box 等 TUN + fake-ip 代理，本机 DNS 返回了 `198.18.x.x` 占位地址。默认 `local` 模式已自动放行并在时间线给出提示；若设为 `hosted` 模式，可通过 `PAPER2CODE_REPO_ALLOW_CIDRS=198.18.0.0/15` 显式信任。企业内网 GitLab / 镜像请同时将域名加入 `PAPER2CODE_REPO_ALLOWED_HOSTS`。
+</details>
+
+<details>
+<summary>运行中途报 RateLimitError / 429 或连接瞬断</summary>
+
+系统优先读取响应头限额，其次解析网关中英文限流话术并自动降速重试；遇到连接中断或网关 5xx 会自动退避重试；额度用尽/欠费会直接提示不再重试。即便最终失败，已经定位并核验的结论仍会照常交付。如需手动钉死速率，可设置 `PAPER2CODE_LLM_MAX_REQUESTS_PER_MINUTE`。
+</details>
+
+<details>
+<summary>自检返回一整页 HTML 或 403</summary>
+
+部分套了 Cloudflare 的中转站会拦截 Python SDK 的默认 User-Agent。Paper2code 默认使用 `Paper2code/0.1`；若仍被拦截，可将 `PAPER2CODE_HTTP_USER_AGENT` 设为常规浏览器 UA 并重启后端。
+</details>
+
+<details>
+<summary>仓库包含大体积视频或权重，克隆慢或超限</summary>
+
+默认开启源码视图克隆（`--filter=blob:none --sparse`），实测含 83MB 演示视频的仓库可从 237MB 降至 2.3MB。冷门大二进制文件会在时间线点名，按提示补充 `PAPER2CODE_REPO_SPARSE_EXCLUDE=!*.xxx` 即可。
+</details>
+
+<details>
+<summary>开发模式下页面能打开，但按钮点击无反应</summary>
+
+请通过 `http://localhost:3000` 访问而非 `http://127.0.0.1:3000`（Next.js dev HMR 会拦截跨源请求导致前端未 hydration），同时确认 `NEXT_PUBLIC_API_BASE` 与后端端口一致。
+</details>
+
+---
+
+## 参与贡献
+
+欢迎提 Issue 与 PR。提交前请确认：
+
+1. 为行为改动补充回归测试/验收断言，并确保 `cd backend && ./scripts/run_all_checks.sh` 与 `.venv/bin/pytest` 全部通过。
+2. 修改前端后执行 `cd frontend && pnpm exec tsc --noEmit && pnpm lint && pnpm test && pnpm build`。
+3. 守住三条底线：不写死服务商/模型（协议差异只放 `providers.py`）；引用必须可机械核验；代码、日志与提交中绝不出现密钥。
+
+## 致谢与许可证
+
+基于 [FastAPI](https://fastapi.tiangolo.com/)、[LiteLLM](https://github.com/BerriAI/litellm)、[PyMuPDF](https://pymupdf.readthedocs.io/)、[sse-starlette](https://github.com/sysid/sse-starlette)、[Next.js](https://nextjs.org/)、[React](https://react.dev/)、[Tailwind CSS](https://tailwindcss.com/)、[PDF.js](https://mozilla.github.io/pdf.js/)、[KaTeX](https://katex.org/) 与 [Prism](https://prismjs.com/) 构建。
+
+本项目采用 [Apache License 2.0](LICENSE) 开源许可。
