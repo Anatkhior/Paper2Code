@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 300" width="960" height="300" role="img" aria-label="Paper2code 两阶段对照阅读工作流">
+  <defs>
+    <filter id="sh" x="-4%" y="-8%" width="108%" height="122%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="rgba(15, 23, 42, 0.06)" />
+    </filter>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#64748b" />
+    </marker>
+    <marker id="arr-accent" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#0f766e" />
+    </marker>
+  </defs>
+
+  <style>
+    .t-title { font: 600 14px -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', 'Segoe UI', sans-serif; fill: #0f172a; }
+    .t-body { font: 400 12px -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', 'Segoe UI', sans-serif; fill: #475569; }
+    .t-pill { font: 600 11px -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', 'Segoe UI', sans-serif; fill: #115e59; }
+    .t-pill-info { font: 600 11px -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', 'Segoe UI', sans-serif; fill: #1d4ed8; }
+    .t-cap { font: 500 11px -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', 'Segoe UI', sans-serif; fill: #64748b; }
+  </style>
+
+  <!-- Outer canvas -->
+  <rect x="8" y="8" width="944" height="284" rx="16" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1" />
+
+  <!-- Step 1: Inputs -->
+  <g filter="url(#sh)">
+    <rect x="28" y="40" width="166" height="124" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
+  </g>
+  <rect x="42" y="54" width="52" height="20" rx="10" fill="#f1f5f9" />
+  <text x="68" y="68" text-anchor="middle" class="t-cap">输入</text>
+  <text x="42" y="98" class="t-title">论文 + 仓库</text>
+  <text x="42" y="120" class="t-body">• 论文 PDF 文件</text>
+  <text x="42" y="140" class="t-body">• GitHub / GitLab 地址</text>
+
+  <!-- Arrow 1 -> 2 -->
+  <line x1="194" y1="102" x2="232" y2="102" stroke="#64748b" stroke-width="1.6" marker-end="url(#arr)" />
+
+  <!-- Step 2: Phase A -->
+  <g filter="url(#sh)">
+    <rect x="238" y="40" width="206" height="124" rx="12" fill="#ffffff" stroke="#5eead4" stroke-width="1.4" />
+  </g>
+  <rect x="252" y="54" width="84" height="20" rx="10" fill="#f0fdfa" />
+  <text x="294" y="68" text-anchor="middle" class="t-pill">阶段 A · 侦察</text>
+  <text x="252" y="98" class="t-title">梳理核心创新点</text>
+  <text x="252" y="120" class="t-body">Agent 通读论文，提炼 3–5 条</text>
+  <text x="252" y="140" class="t-body">创新点，附页码、原文引文与线索</text>
+
+  <!-- Arrow 2 -> 3 -->
+  <line x1="444" y1="102" x2="482" y2="102" stroke="#0f766e" stroke-width="1.6" marker-end="url(#arr-accent)" />
+
+  <!-- Step 3: Phase B -->
+  <g filter="url(#sh)">
+    <rect x="488" y="40" width="212" height="124" rx="12" fill="#ffffff" stroke="#5eead4" stroke-width="1.4" />
+  </g>
+  <rect x="502" y="54" width="84" height="20" rx="10" fill="#f0fdfa" />
+  <text x="544" y="68" text-anchor="middle" class="t-pill">阶段 B · 定位</text>
+  <text x="502" y="98" class="t-title">自主探索代码实现</text>
+  <text x="502" y="120" class="t-body">只读探索源码目录，逐条定位</text>
+  <text x="502" y="140" class="t-body">文件、行号并生成逐段代码讲解</text>
+
+  <!-- Arrow 3 -> 4 -->
+  <line x1="700" y1="102" x2="738" y2="102" stroke="#0f766e" stroke-width="1.6" marker-end="url(#arr-accent)" />
+
+  <!-- Step 4: Output -->
+  <g filter="url(#sh)">
+    <rect x="744" y="40" width="188" height="124" rx="12" fill="#f0fdfa" stroke="#5eead4" stroke-width="1.4" />
+  </g>
+  <rect x="758" y="54" width="70" height="20" rx="10" fill="#ffffff" />
+  <text x="793" y="68" text-anchor="middle" class="t-pill">交互阅读</text>
+  <text x="758" y="98" class="t-title">双栏对照与追问</text>
+  <text x="758" y="120" class="t-body">• 左 PDF 原版 / 右代码讲解</text>
+  <text x="758" y="140" class="t-body">• 随时追问、历史回看与续问</text>
+
+  <!-- Bottom callout 1: Human in the loop (connected cleanly into & out of box) -->
+  <line x1="341" y1="164" x2="341" y2="200" stroke="#64748b" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#arr)" />
+  <line x1="464" y1="206" x2="464" y2="112" stroke="#0f766e" stroke-width="1.3" stroke-dasharray="4 3" marker-end="url(#arr-accent)" />
+  <rect x="196" y="206" width="298" height="60" rx="10" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1" />
+  <text x="212" y="230" class="t-pill-info">人工介入（两阶段之间）</text>
+  <text x="212" y="250" class="t-body">自由勾选 / 改名目标，或在 PDF 原文直接划选新增</text>
+
+  <!-- Bottom callout 2: Deterministic verification -->
+  <line x1="594" y1="164" x2="594" y2="200" stroke="#0f766e" stroke-width="1.4" marker-end="url(#arr-accent)" />
+  <rect x="520" y="206" width="412" height="60" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
+  <text x="536" y="230" class="t-pill">机械核验层</text>
+  <text x="536" y="250" class="t-body">论文引文逐页校验 · 代码引用经 git show 重算片段哈希重放核验</text>
+</svg>

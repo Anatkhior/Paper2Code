@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 368" width="960" height="368" role="img" aria-label="Paper2code 系统架构图">
+  <defs>
+    <filter id="sh2" x="-4%" y="-6%" width="108%" height="118%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="rgba(15, 23, 42, 0.06)" />
+    </filter>
+    <marker id="a2" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#64748b" />
+    </marker>
+    <marker id="a2-accent" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 1 1.5 L 8.5 5 L 1 8.5 z" fill="#0f766e" />
+    </marker>
+  </defs>
+
+  <style>
+    .t-sec { font: 600 13px -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', 'Segoe UI', sans-serif; fill: #0f172a; }
+    .t-sub { font: 500 10.5px 'IBM Plex Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; fill: #64748b; }
+    .t-card { font: 600 12.5px -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', 'Segoe UI', sans-serif; fill: #0f172a; }
+    .t-desc { font: 400 11.5px -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', 'Segoe UI', sans-serif; fill: #475569; }
+    .t-label { font: 500 10.5px 'IBM Plex Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace; fill: #475569; }
+  </style>
+
+  <!-- Outer canvas -->
+  <rect x="8" y="8" width="944" height="352" rx="16" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1" />
+
+  <!-- Column 1: Frontend -->
+  <g filter="url(#sh2)">
+    <rect x="24" y="28" width="236" height="312" rx="14" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
+  </g>
+  <text x="40" y="54" class="t-sec">前端工作台</text>
+  <text x="40" y="72" class="t-sub">Next.js 16 · React 19 · Tailwind 4</text>
+
+  <rect x="40" y="88" width="204" height="52" rx="9" fill="#f1f5f9" />
+  <text x="52" y="110" class="t-card">创新点目录与结论</text>
+  <text x="52" y="128" class="t-desc">勾选、改名、划选目标、覆盖率</text>
+
+  <rect x="40" y="150" width="204" height="52" rx="9" fill="#f0fdfa" stroke="#5eead4" stroke-width="1" />
+  <text x="52" y="172" class="t-card">双栏对照阅读器</text>
+  <text x="52" y="190" class="t-desc">PDF.js 原版划选 · Prism 行内讲解</text>
+
+  <rect x="40" y="212" width="204" height="52" rx="9" fill="#f1f5f9" />
+  <text x="52" y="234" class="t-card">追问对话 &amp; 行动轨迹</text>
+  <text x="52" y="252" class="t-desc">KaTeX 公式 · SSE 实时进度与停止</text>
+
+  <rect x="40" y="274" width="204" height="52" rx="9" fill="#f1f5f9" />
+  <text x="52" y="296" class="t-card">本机历史 &amp; 主题切换</text>
+  <text x="52" y="314" class="t-desc">搜索筛选删除 · 换模型续问</text>
+
+  <!-- Arrow FE <-> BE -->
+  <line x1="260" y1="184" x2="314" y2="184" stroke="#0f766e" stroke-width="1.6" marker-end="url(#a2-accent)" marker-start="url(#a2-accent)" />
+  <text x="287" y="172" text-anchor="middle" class="t-label">REST</text>
+  <text x="287" y="201" text-anchor="middle" class="t-label">SSE</text>
+
+  <!-- Column 2: Backend -->
+  <g filter="url(#sh2)">
+    <rect x="320" y="28" width="374" height="312" rx="14" fill="#ffffff" stroke="#5eead4" stroke-width="1.4" />
+  </g>
+  <text x="336" y="54" class="t-sec">FastAPI 后端服务</text>
+  <text x="336" y="72" class="t-sub">Python 3.12 · 统一事件总线 · 本地落盘</text>
+
+  <!-- API + SSE bar -->
+  <rect x="336" y="88" width="342" height="46" rx="9" fill="#f1f5f9" />
+  <text x="348" y="108" class="t-card">接口层 &amp; SSE 推送</text>
+  <text x="666" y="108" text-anchor="end" class="t-sub">main / events / history</text>
+  <text x="348" y="125" class="t-desc">会话快照、断线续传、历史索引与读取</text>
+
+  <!-- Agent Loop -->
+  <rect x="336" y="148" width="342" height="60" rx="9" fill="#f0fdfa" stroke="#5eead4" stroke-width="1.2" />
+  <text x="348" y="170" class="t-card">Agent 工具循环</text>
+  <text x="666" y="170" text-anchor="end" class="t-sub">agent/loop.py</text>
+  <text x="348" y="192" class="t-desc">流式输出 · 预算提醒与早停 · 限流退避 · 失败仍交付</text>
+
+  <!-- Down arrows from loop -->
+  <line x1="390" y1="208" x2="390" y2="230" stroke="#64748b" stroke-width="1.4" marker-end="url(#a2)" />
+  <line x1="507" y1="208" x2="507" y2="230" stroke="#64748b" stroke-width="1.4" marker-end="url(#a2)" />
+  <line x1="624" y1="208" x2="624" y2="230" stroke="#64748b" stroke-width="1.4" marker-end="url(#a2)" />
+
+  <!-- Bottom 3 modules -->
+  <rect x="336" y="236" width="108" height="88" rx="9" fill="#f1f5f9" />
+  <text x="346" y="258" class="t-card">原子工具</text>
+  <text x="346" y="276" class="t-desc">读论文 / 搜代码</text>
+  <text x="346" y="294" class="t-desc">record_plan</text>
+  <text x="346" y="311" class="t-desc">record_finding</text>
+
+  <rect x="453" y="236" width="108" height="88" rx="9" fill="#f1f5f9" />
+  <text x="463" y="258" class="t-card">机械核验</text>
+  <text x="463" y="276" class="t-desc">引文页码匹配</text>
+  <text x="463" y="294" class="t-desc">git show 重放</text>
+  <text x="463" y="311" class="t-desc">verify.py</text>
+
+  <rect x="570" y="236" width="108" height="88" rx="9" fill="#f1f5f9" />
+  <text x="580" y="258" class="t-card">仓库访问</text>
+  <text x="580" y="276" class="t-desc">源码视图克隆</text>
+  <text x="580" y="294" class="t-desc">地址与路径守卫</text>
+  <text x="580" y="311" class="t-desc">repo_source.py</text>
+
+  <!-- Orthogonal clean arrows BE -> External -->
+  <path d="M 678 178 L 718 178 Q 726 178 726 170 L 726 114 Q 726 106 734 106 L 754 106" fill="none" stroke="#0f766e" stroke-width="1.6" marker-end="url(#a2-accent)" />
+  <text x="726" y="96" text-anchor="middle" class="t-label">BYOK</text>
+
+  <line x1="678" y1="280" x2="754" y2="280" stroke="#64748b" stroke-width="1.6" marker-end="url(#a2)" />
+  <text x="724" y="269" text-anchor="middle" class="t-label">sparse</text>
+  <text x="724" y="296" text-anchor="middle" class="t-label">clone</text>
+
+  <!-- Column 3: External Services -->
+  <g filter="url(#sh2)">
+    <rect x="760" y="42" width="176" height="128" rx="12" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.2" />
+  </g>
+  <text x="776" y="70" class="t-sec">任意 LLM 端点</text>
+  <text x="776" y="88" class="t-sub">providers.py · LiteLLM</text>
+  <text x="776" y="114" class="t-desc">• OpenAI / DeepSeek</text>
+  <text x="776" y="134" class="t-desc">• Anthropic / OpenRouter</text>
+  <text x="776" y="154" class="t-desc">• 本地 vLLM / Ollama</text>
+
+  <g filter="url(#sh2)">
+    <rect x="760" y="214" width="176" height="126" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1" />
+  </g>
+  <text x="776" y="242" class="t-sec">代码托管站</text>
+  <text x="776" y="260" class="t-sub">HTTPS · 稀疏浅克隆</text>
+  <text x="776" y="286" class="t-desc">• GitHub / GitLab</text>
+  <text x="776" y="306" class="t-desc">• 企业自建镜像（白名单）</text>
+  <text x="776" y="326" class="t-desc">• 锁定 40 位 commit</text>
+</svg>
